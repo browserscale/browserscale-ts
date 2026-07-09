@@ -1,0 +1,718 @@
+syntax = "proto3";
+
+package browserscale.v1;
+
+option go_package = "github.com/browserscale/browserscale-go/generated";
+
+import "google/protobuf/empty.proto";
+
+// ──────────────────────────────────────────────────────────────────────
+// Service
+// ──────────────────────────────────────────────────────────────────────
+//
+// Every RPC carries `session_id` + `api_key` for authentication. The
+// session implicitly identifies the browser context that was created at
+// rent time, so the WRC.pdl `browserContextId` / `contextId` parameters
+// are not exposed on the wire (server resolves them from session_id).
+//
+// `page_id` stays as an explicit parameter, mirroring WRC.pdl exactly:
+// one browser context can host multiple pages (tabs/popups).
+
+service Browser {
+  // Context-level
+  rpc SetProxy(SetProxyRequest) returns (google.protobuf.Empty);
+  rpc GetPages(GetPagesRequest) returns (GetPagesResponse);
+
+  // Page navigation / content
+  rpc Navigate(NavigateRequest) returns (NavigateResponse);
+  rpc LoadHTML(LoadHTMLRequest) returns (google.protobuf.Empty);
+
+  // Evaluation
+  rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
+
+  // Waiting
+  rpc WaitForAny(WaitForAnyParams) returns (WaitResult);
+
+  // Element actions
+  rpc SelectOption(SelectOptionRequest) returns (SelectOptionResult);
+  rpc ScrollTo(ScrollToRequest) returns (ElementResult);
+  rpc MoveTo(MoveToRequest) returns (ElementResult);
+  rpc Click(ClickRequest) returns (ElementResult);
+  rpc Drag(DragRequest) returns (DragResult);
+  rpc Fill(FillRequest) returns (ElementResult);
+
+  // Network interception
+  rpc SetBlockList(SetBlockListRequest) returns (google.protobuf.Empty);
+  rpc SetStaticPaths(SetStaticPathsRequest) returns (google.protobuf.Empty);
+  rpc WaitForAnyRequest(WaitForAnyRequestRequest) returns (WaitForAnyRequestResponse);
+  rpc WaitForAnyResponse(WaitForAnyResponseRequest) returns (WaitForAnyResponseResponse);
+  rpc ModifyRequest(ModifyRequestRequest) returns (ModifyRequestResponse);
+
+  // Cookies
+  rpc GetCookies(GetCookiesRequest) returns (GetCookiesResponse);
+  rpc SetCookies(SetCookiesRequest) returns (google.protobuf.Empty);
+  rpc ClearCookies(ClearCookiesRequest) returns (google.protobuf.Empty);
+
+  // Storage (localStorage)
+  rpc GetStorage(GetStorageRequest) returns (GetStorageResponse);
+  rpc SetStorage(SetStorageRequest) returns (google.protobuf.Empty);
+  rpc ClearStorage(ClearStorageRequest) returns (google.protobuf.Empty);
+
+  // DOM / observation
+  rpc GetDOM(GetDOMRequest) returns (GetDOMResponse);
+  rpc GetDOMHash(GetDOMHashRequest) returns (GetDOMHashResponse);
+  rpc GetObservation(GetObservationRequest) returns (GetObservationResponse);
+  rpc InspectAtPosition(InspectAtPositionRequest) returns (InspectAtPositionResponse);
+  rpc HighlightNode(HighlightNodeRequest) returns (google.protobuf.Empty);
+
+  // Screenshot / capture
+  rpc Screenshot(ScreenshotRequest) returns (ScreenshotResponse);
+
+  // Keyboard / IME (used by the live browser UI on top of the WebRTC stream)
+  rpc InsertText(InsertTextRequest) returns (google.protobuf.Empty);
+  rpc PressKey(PressKeyRequest) returns (google.protobuf.Empty);
+  rpc ReleaseKey(ReleaseKeyRequest) returns (google.protobuf.Empty);
+  rpc GetSelection(GetSelectionRequest) returns (GetSelectionResponse);
+
+  // Captcha solver
+  rpc SolveCaptcha(SolveCaptchaRequest) returns (SolveCaptchaResponse);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Common types
+// ──────────────────────────────────────────────────────────────────────
+
+message Rect {
+  double x = 1;
+  double y = 2;
+  double width = 3;
+  double height = 4;
+}
+
+message FrameInfo {
+  string frame_id = 1;
+  string url = 2;
+  bool is_oopif = 3;
+  bool has_js_context = 4;
+  bool is_loading = 5;
+  bool is_visible = 6;
+  Rect absolute_rect = 7;
+  Rect relative_rect = 8;
+  repeated FrameInfo children = 9;
+}
+
+message PageInfo {
+  string page_id = 1;
+  string browser_context_id = 2;
+  string url = 3;
+  string title = 4;
+  Rect viewport = 5;
+  FrameInfo frame_tree = 6;
+}
+
+message Header {
+  string name = 1;
+  string value = 2;
+}
+
+message InterceptedRequest {
+  string method = 1;
+  string url = 2;
+  repeated Header headers = 3;
+  string body = 4;
+  string resource_type = 5;
+}
+
+message InterceptedResponse {
+  string url = 1;
+  int32 status_code = 2;
+  repeated Header headers = 3;
+  string body = 4;
+}
+
+message HeaderModification {
+  string name = 1;
+  optional string value = 2;
+  // "add" | "edit" | "remove"
+  string action = 3;
+  optional string before = 4;
+  optional string after = 5;
+}
+
+message CookiePartitionKey {
+  string top_level_site = 1;
+  bool has_cross_site_ancestor = 2;
+}
+
+message CookieParam {
+  string name = 1;
+  string value = 2;
+  optional string url = 3;
+  string domain = 4;
+  string path = 5;
+  optional bool secure = 6;
+  optional bool http_only = 7;
+  optional string same_site = 8;
+  optional double expires = 9;
+  optional string priority = 10;
+  optional string source_scheme = 11;
+  optional int32 source_port = 12;
+  optional CookiePartitionKey partition_key = 13;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Waiting
+// ──────────────────────────────────────────────────────────────────────
+
+// Exactly one of `selector` or `js_expression` must be set per condition.
+message WaitCondition {
+  optional string selector = 1;
+  optional string js_expression = 2;
+  optional bool visible = 3;
+  optional double steady_time = 4;
+}
+
+message WaitResult {
+  int32 index = 1;
+  string frame_id = 2;
+  int32 backend_node_id = 3;
+  bool is_visible = 4;
+  Rect bounds = 5;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Element action results
+// ──────────────────────────────────────────────────────────────────────
+
+message ElementResult {
+  bool success = 1;
+  string frame_id = 2;
+  int32 backend_node_id = 3;
+  bool is_visible = 4;
+  Rect bounds = 5;
+  double root_x = 6;
+  double root_y = 7;
+}
+
+message DragResult {
+  bool success = 1;
+  string frame_id = 2;
+  int32 backend_node_id = 3;
+  double start_x = 4;
+  double start_y = 5;
+  double end_x = 6;
+  double end_y = 7;
+}
+
+message SelectOptionResult {
+  int32 selected_index = 1;
+  string selected_value = 2;
+  string selected_text = 3;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Context-level RPCs
+// ──────────────────────────────────────────────────────────────────────
+
+message SetProxyRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // Empty/omitted = clear the proxy.
+  optional string proxy_host = 3;
+  optional int32 proxy_port = 4;
+  optional string proxy_username = 5;
+  optional string proxy_password = 6;
+}
+
+message GetPagesRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+message GetPagesResponse {
+  repeated PageInfo pages = 1;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Page navigation / content
+// ──────────────────────────────────────────────────────────────────────
+
+message NavigateRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  string url = 4;
+  optional string referrer = 5;
+  optional double timeout = 6;
+}
+
+message NavigateResponse {
+  string frame_id = 1;
+  string url = 2;
+}
+
+message LoadHTMLRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  string url = 4;
+  string html = 5;
+  repeated Header headers = 6;
+  optional int32 status_code = 7;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Evaluation
+// ──────────────────────────────────────────────────────────────────────
+
+message EvaluateRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  string expression = 4;
+  // Specific frameId or empty/omitted for main frame.
+  // ALL_FRAMES is not supported here.
+  optional string frame_id = 5;
+}
+
+message EvaluateResponse {
+  // JSON-serialized result. Empty for DOM elements or unserializable values.
+  string result = 1;
+  // Non-zero if the expression returned a DOM element.
+  int32 backend_node_id = 2;
+  bool is_visible = 3;
+  Rect bounds = 4;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Waiting
+// ──────────────────────────────────────────────────────────────────────
+
+// Note: named "WaitForAnyParams" instead of "WaitForAnyRequest" to avoid
+// colliding with the rpc method name "WaitForAnyRequest" (network intercept).
+message WaitForAnyParams {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  repeated WaitCondition conditions = 4;
+  // Specific frameId, empty/omitted for main frame, or "ALL_FRAMES".
+  optional string frame_id = 5;
+  optional double timeout = 6;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Element actions (click, fill, select, scroll, move, drag)
+// ──────────────────────────────────────────────────────────────────────
+
+message SelectOptionRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+
+  optional int32 backend_node_id = 4;
+  optional string selector = 5;
+  optional string js_expression = 6;
+  // Specific frameId, empty/omitted for main frame, or "ALL_FRAMES".
+  optional string frame_id = 7;
+
+  // Exactly one of index / value / text must be set.
+  optional int32 index = 8;
+  optional string value = 9;
+  optional string text = 10;
+
+  // Fire input + change events. Default true.
+  optional bool fire_events = 11;
+}
+
+message ScrollToRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+
+  optional int32 backend_node_id = 4;
+  optional string selector = 5;
+  optional string js_expression = 6;
+  optional string frame_id = 7;
+}
+
+message MoveToRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+
+  optional int32 backend_node_id = 4;
+  optional string selector = 5;
+  optional string js_expression = 6;
+  optional string frame_id = 7;
+
+  // Use instead of element locators.
+  optional double x = 8;
+  optional double y = 9;
+}
+
+message ClickRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+
+  optional int32 backend_node_id = 4;
+  optional string selector = 5;
+  optional string js_expression = 6;
+  optional string frame_id = 7;
+
+  // "left" (default), "right", or "middle".
+  optional string button = 8;
+  // 1 = single click (default), 2 = double click.
+  optional int32 click_count = 9;
+  // Use instead of element locators.
+  optional double x = 10;
+  optional double y = 11;
+  // "click" (default), "press" (mouseDown only), "release" (mouseUp only).
+  optional string action = 12;
+}
+
+message DragRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+
+  optional int32 backend_node_id = 4;
+  optional string selector = 5;
+  optional string js_expression = 6;
+  optional string frame_id = 7;
+
+  // Offset from pickup point OR absolute root-viewport coordinates.
+  optional double offset_x = 8;
+  optional double offset_y = 9;
+  optional double absolute_x = 10;
+  optional double absolute_y = 11;
+}
+
+message FillRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+
+  optional int32 backend_node_id = 4;
+  optional string selector = 5;
+  optional string js_expression = 6;
+  optional string frame_id = 7;
+
+  string text = 8;
+  // Clear existing content (Ctrl+A, Delete) before typing. Default false,
+  // so Fill appends to whatever is already in the field unless this is set.
+  optional bool clear_first = 9;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Network interception
+// ──────────────────────────────────────────────────────────────────────
+
+message SetBlockListRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // URL wildcard patterns to block. Empty list clears the blocklist.
+  repeated string patterns = 3;
+}
+
+message SetStaticPathsRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // URL wildcard patterns to match. Empty disables caching.
+  repeated string patterns = 3;
+  string blob_name = 4;
+}
+
+message WaitForAnyRequestRequest {
+  string session_id = 1;
+  string api_key = 2;
+  repeated string patterns = 3;
+  // Per-pattern abort flag (1 = block, 0 = observe only). Omit to observe all.
+  repeated int32 abort_flags = 4;
+  optional double timeout = 5;
+}
+
+message WaitForAnyRequestResponse {
+  int32 index = 1;
+  InterceptedRequest request = 2;
+}
+
+message WaitForAnyResponseRequest {
+  string session_id = 1;
+  string api_key = 2;
+  repeated string patterns = 3;
+  // Per-pattern abort flag (1 = replace with empty 200, 0 = pass through).
+  repeated int32 abort_flags = 4;
+  optional double timeout = 5;
+}
+
+message WaitForAnyResponseResponse {
+  int32 index = 1;
+  InterceptedResponse response = 2;
+}
+
+message ModifyRequestRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string url_pattern = 3;
+  repeated HeaderModification modifications = 4;
+  // Override POST/PUT/PATCH body. Empty = no body change.
+  optional string body = 5;
+  optional double timeout = 6;
+}
+
+message ModifyRequestResponse {
+  InterceptedRequest request = 1;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Cookies
+// ──────────────────────────────────────────────────────────────────────
+
+message GetCookiesRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+message GetCookiesResponse {
+  repeated CookieParam cookies = 1;
+}
+
+message SetCookiesRequest {
+  string session_id = 1;
+  string api_key = 2;
+  repeated CookieParam cookies = 3;
+}
+
+message ClearCookiesRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Storage (localStorage)
+// ──────────────────────────────────────────────────────────────────────
+
+message StorageItem {
+  // localStorage key.
+  string key = 1;
+  // localStorage value.
+  string value = 2;
+}
+
+message StorageOriginEntry {
+  // Serialized origin, e.g. "https://example.com".
+  string origin = 1;
+  // Key/value pairs for this origin.
+  repeated StorageItem items = 2;
+}
+
+message GetStorageRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // If set, only this origin is returned (e.g. "https://example.com").
+  // Otherwise all origins with localStorage data are returned.
+  optional string origin = 3;
+}
+
+message GetStorageResponse {
+  // localStorage entries grouped by origin.
+  repeated StorageOriginEntry storage = 1;
+}
+
+message SetStorageRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // Entries to write, grouped by origin. Accepts the same structure
+  // GetStorage returns, so a dump can be fed back verbatim.
+  repeated StorageOriginEntry storage = 3;
+  // If true, each origin present in `storage` is cleared before writing.
+  optional bool clear_first = 4;
+}
+
+message ClearStorageRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // If set, only this origin's storage is deleted; otherwise all origins.
+  optional string origin = 3;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// DOM / observation
+// ──────────────────────────────────────────────────────────────────────
+
+message GetDOMRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  optional string frame_id = 4;
+  // -1 = full tree (default), 0 = root only, N = root + N descendant levels.
+  optional int32 depth = 5;
+}
+
+message GetDOMResponse {
+  // JSON string in CDP DOM.Node shape (root is the Document node).
+  string dom = 1;
+}
+
+message GetObservationRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  // Default 500.
+  optional int32 max_elements_per_frame = 4;
+  // Default 240.
+  optional int32 max_text_length = 5;
+}
+
+message GetObservationResponse {
+  // Compact plain-text observation intended for LLM context.
+  string observation_text = 1;
+  // Structured JSON with frames, elements, counts, and limits.
+  string observation_json = 2;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// DOM hash / inspect / highlight (UI helpers)
+// ──────────────────────────────────────────────────────────────────────
+
+// GetDOMHash is a cheap polling endpoint for change-detection. The server
+// computes sha256[:8] of the full-tree DOM JSON and returns just that.
+message GetDOMHashRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  optional string frame_id = 4;
+}
+
+message GetDOMHashResponse {
+  string hash = 1;
+}
+
+message InspectAtPositionRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  // Viewport-relative CSS pixels.
+  double x = 4;
+  double y = 5;
+}
+
+message InspectAtPositionResponse {
+  // 0 if nothing was found at (x, y).
+  int32 backend_node_id = 1;
+  string frame_id = 2;
+  string tag_name = 3;
+  // Trimmed text content (max ~200 chars, server-imposed).
+  string text_content = 4;
+  bool is_visible = 5;
+  Rect bounds = 6;
+}
+
+message HighlightNodeRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  // <= 0 clears all highlights.
+  int32 backend_node_id = 4;
+  optional string frame_id = 5;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Keyboard / IME / selection
+// ──────────────────────────────────────────────────────────────────────
+
+// IME-style text insertion at the current cursor position — no individual
+// key events. Targets whatever element currently has focus.
+message InsertTextRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  string text = 4;
+}
+
+// Fires a single key-down (PressKey) or key-up (ReleaseKey) event. For
+// full press cycles (down + char + up) call PressKey followed by ReleaseKey,
+// or use one of the higher-level typing helpers in the SDK.
+message PressKeyRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  // DOM key value (e.g. "a", "Enter", "ArrowDown", "Shift").
+  string key = 4;
+  // DOM code value (e.g. "KeyA", "Enter", "ArrowDown", "ShiftLeft").
+  optional string code = 5;
+  // Bit flags: Alt=1, Ctrl=2, Meta=4, Shift=8.
+  optional int32 modifiers = 6;
+  // DOM KeyboardEvent.location (0=standard, 1=left, 2=right, 3=numpad).
+  optional int32 location = 7;
+}
+
+message ReleaseKeyRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  string key = 4;
+  optional string code = 5;
+  optional int32 modifiers = 6;
+  optional int32 location = 7;
+}
+
+message GetSelectionRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+}
+
+message GetSelectionResponse {
+  // Empty if nothing is selected on the page.
+  string text = 1;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Screenshot / capture
+// ──────────────────────────────────────────────────────────────────────
+
+// Screenshot captures a single image of the page's current frame. The server
+// uses a one-shot surface copy (the same mechanism as CDP
+// Page.captureScreenshot), independent of any active WRC.startStream video
+// stream, and works with both GPU (hardware) and software compositing.
+message ScreenshotRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  // Image format: "png" (default), "jpeg", or "webp".
+  optional string format = 4;
+  // Encode quality 0-100 for "jpeg"/"webp" (ignored for "png"). Default 90.
+  optional int32 quality = 5;
+}
+
+message ScreenshotResponse {
+  // Encoded image bytes as base64 (PNG by default).
+  string data_base64 = 1;
+  // Image width in physical pixels.
+  int32 width = 2;
+  // Image height in physical pixels.
+  int32 height = 3;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Captcha solver
+// ──────────────────────────────────────────────────────────────────────
+
+message SolveCaptchaRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // Total time budget in ms. 0 = server default (60s).
+  int32 timeout_ms = 3;
+  // Retry the solve flow this many times before giving up.
+  int32 retry_amount = 4;
+}
+
+message SolveCaptchaResponse {
+  // Solution token returned by the underlying challenge, when applicable.
+  // Empty on success — most challenges are completed in-page server-side
+  // and require no further action from the caller. Empty on failure too.
+  string result = 1;
+}
+

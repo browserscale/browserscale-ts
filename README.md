@@ -1,0 +1,123 @@
+# browserscale-ts — browserscale SDK for TypeScript
+
+Official TypeScript SDK for [browserscale](https://browserscale.cloud): real
+Chromium browsers in the cloud, driven over gRPC. Rent an isolated browser
+session in seconds, automate it with human-like input, intercept network
+traffic, solve captchas, and watch a live video stream of everything your
+script does.
+
+## Features
+
+- **Real browser sessions as a service** — full Chromium in the cloud with
+  pages, frames, cookies, storage and network state. No local binary.
+- **Parallel isolated contexts** — each task gets its own session, fingerprint
+  and lifecycle; large queues never share browser state. Sessions are browser
+  contexts, not VMs or processes, so they spin up in under 50 ms and fan out to
+  thousands in parallel.
+- **Fingerprint & proxy handling** — pinnable server-side fingerprints,
+  native Chrome control without CDP/Playwright/Puppeteer leaks, bring your own
+  proxy or let browserscale allocate one.
+- **Native engine-level control** — automation runs natively inside Chromium
+  itself, not from outside over the DevTools protocol. Nothing is injected, no
+  `Runtime.enable`, no DevTools handshake — page JS can't observe it. Waits run
+  fully async with no polling loop, and built-in steady-time checks only report
+  an element once it's stable in the DOM.
+- **One flat frame tree** — main document, same-origin iframes and cross-origin
+  OOPIFs are all just a `frameId` in one tree, no flattened sessions or
+  per-frame execution-context juggling. `wait`/`click` act across all frames or
+  a single iframe, and `wait` returns the `frameId` that matched.
+- **Human-like interaction** — mouse paths use browserscale's own movement algorithm
+  instead of instant synthetic jumps.
+- **WebRTC live video stream** — watch and control the rented browser live
+  from the browserscale web interface; mouse and keyboard go back over data channels.
+- **Captcha support, no third-party solvers** — passive anti-bot checks are
+  handled automatically; interactive challenges are solved with `solveCaptcha`
+  by browserscale's own AI solver, which learns the known challenge types — puzzle,
+  OCR, slide, hold and more — on its own and keeps improving as they evolve.
+  No token is ever synthesized or fetched from an external API: the challenge
+  is completed in the valid live browser and the provider's own JavaScript
+  issues the token itself — which is why even new or unknown protections
+  pass.
+- **Real hardware, real GPUs** — sessions run hardware-accelerated on real
+  consumer GPUs, not on VM cores with a WebGL faking layer. Canvas and WebGL
+  readbacks (`toDataURL`, `getImageData`) return genuinely rendered pixels —
+  no spoofing layer or fingerprint hash database for new bot protections to
+  unmask.
+- **Network control at the source** — interception sits in the browser's
+  network stack itself, so every request from every frame (including
+  cross-origin OOPIFs) passes through it; no handler races, nothing slips
+  through. Wait for, block, mock or modify requests and responses without
+  leaving the SDK; mark repeated assets as static with `setStaticPaths` to
+  serve them from a server-side cache and cut proxy bandwidth on repeat runs.
+- **Agent-friendly observation** — `getObservation` returns a compact
+  text/JSON view of the visible, interactive elements across every frame, each
+  with a node handle to act on, so a model reasons over what matters instead of
+  raw HTML.
+- **Flow-optimized TypeScript** — fully typed promise-based API, `wait` races
+  multiple outcomes, JS locators target elements by page logic when CSS is
+  not enough. Runs in Node.js (native gRPC) and the browser (WebSocket via
+  `browserscale/browser`).
+
+## Install
+
+```bash
+npm install browserscale
+```
+
+Requires Node 18+. Ships as an ES module with bundled type declarations.
+
+## Quickstart
+
+```ts
+import { rentBrowser, BrowserConfig, css } from "browserscale";
+
+async function main() {
+    // Empty proxy fields tell browserscale to allocate a managed proxy server-side;
+    // pass your own host/port/creds to bring your own.
+    const cfg = new BrowserConfig(
+        "YOUR_API_KEY", // sk_…
+        300,            // rent duration in seconds (5 minutes)
+        "", 0, "", "",  // proxy host / port / user / pass
+    );
+
+    const browser = await rentBrowser(cfg);
+    try {
+        await browser.navigate("https://example.com");
+        await browser.wait(css("h1"));
+
+        const res = await browser.evaluate("document.title");
+        console.log("title:", res.value);
+    } finally {
+        await browser.stopBrowser(); // always release the session
+    }
+}
+
+main();
+```
+
+Run it and you should see `title: Example Domain`. Get an API key from your
+[dashboard](https://browserscale.cloud/dashboard/api-keys).
+
+## Documentation
+
+- [Introduction](https://browserscale.cloud/docs) — what browserscale is, use cases and
+  the mental model behind sessions, pages, frames and locators
+- [Quickstart](https://browserscale.cloud/docs/quickstart) — from install to a
+  running script in under a minute
+- [Core concepts](https://browserscale.cloud/docs/concepts)
+- Guides — [locators](https://browserscale.cloud/docs/guides/locators),
+  [waiting](https://browserscale.cloud/docs/guides/waiting),
+  [network](https://browserscale.cloud/docs/guides/network),
+  [cookies](https://browserscale.cloud/docs/guides/cookies),
+  [captchas](https://browserscale.cloud/docs/guides/captchas) and more
+- [TypeScript API reference](https://browserscale.cloud/docs/api-reference/ts) —
+  every method, type and option with runnable examples
+
+## Go
+
+Prefer Go? Use the Go SDK:
+[browserscale-go](https://github.com/browserscale/browserscale-go).
+
+## License
+
+[MIT](LICENSE)

@@ -1,0 +1,80 @@
+{
+  "name": "browserscale",
+  "version": "1.0.0",
+  "description": "Official SDK for browserscale — undetected stealth browsers in the cloud. Rent real Chromium sessions with unique fingerprints, built-in proxies, captcha solving, human-like input and live video — scale web scraping and automation without running a single browser yourself.",
+  "main": "dist/index.js",
+  "type": "module",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browserscale.browser.js",
+      "default": "./dist/browserscale.browser.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:proto": "npx buf generate",
+    "build:node": "tsc -p tsconfig.json",
+    "build:browser": "npx esbuild src/browser.ts --bundle --format=esm --outfile=dist/browserscale.browser.js",
+    "build": "npm run build:proto && npm run build:node && npm run build:browser",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "puppeteer",
+    "playwright",
+    "stealth",
+    "undetected",
+    "undetected-browser",
+    "anti-detect",
+    "bot-detection",
+    "fingerprint",
+    "cloudflare",
+    "cloudflare-bypass",
+    "perimeterx",
+    "perimeterx-bypass",
+    "datadome",
+    "datadome-bypass",
+    "captcha",
+    "headless",
+    "chrome",
+    "chromium",
+    "cloud-browser",
+    "browser-use"
+  ],
+  "author": "browserscale",
+  "license": "MIT",
+  "homepage": "https://browserscale.cloud/docs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/browserscale/browserscale-ts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/browserscale/browserscale-ts/issues"
+  },
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.11.0",
+    "@connectrpc/connect": "^2.1.1",
+    "@connectrpc/connect-node": "^2.1.1"
+  },
+  "devDependencies": {
+    "@bufbuild/buf": "^1.66.1",
+    "@bufbuild/protoc-gen-es": "^2.11.0",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.27.4",
+    "typescript": "^5.9.3"
+  }
+}
