@@ -56,12 +56,12 @@ script does.
 - **Flow-optimized TypeScript** — fully typed promise-based API, `wait` races
   multiple outcomes, JS locators target elements by page logic when CSS is
   not enough. Runs in Node.js (native gRPC) and the browser (WebSocket via
-  `browserscale/browser`).
+  `browserscale-ts/browser`).
 
 ## Install
 
 ```bash
-npm install browserscale
+npm install browserscale-ts
 ```
 
 Requires Node 18+. Ships as an ES module with bundled type declarations.
@@ -69,7 +69,7 @@ Requires Node 18+. Ships as an ES module with bundled type declarations.
 ## Quickstart
 
 ```ts
-import { rentBrowser, BrowserConfig, css } from "browserscale";
+import { rentBrowser, BrowserConfig, css } from "browserscale-ts";
 
 async function main() {
     // Empty proxy fields tell browserscale to allocate a managed proxy server-side;
