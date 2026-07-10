@@ -157,6 +157,23 @@ export interface ScreenshotResult {
 }
 
 /**
+ * ReadCanvasResult is the pixel readback of a <canvas>, returned by
+ * {@link CloudBrowser.readCanvas}. `dataBase64` holds the encoded image bytes
+ * (PNG by default) or the raw RGBA buffer when `format` is `"rgba"`.
+ * `originClean` reports whether the canvas was untainted (informational — the
+ * read succeeds either way).
+ */
+export interface ReadCanvasResult {
+  success: boolean;
+  frameId: string;
+  backendNodeId: number;
+  dataBase64: string;
+  width: number;
+  height: number;
+  originClean: boolean;
+}
+
+/**
  * DOMResult is the full-tree DOM snapshot returned by
  * {@link CloudBrowser.getDOM}, plus its sha256[:8] hash for cheap
  * change detection.

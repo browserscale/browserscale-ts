@@ -36,6 +36,7 @@ export type {
   SelectOptionResult,
   ObservationResult,
   ScreenshotResult,
+  ReadCanvasResult,
   DOMResult,
   InspectResult,
   RentResponse,
@@ -55,6 +56,7 @@ export type {
   GetDOMOpts,
   GetObservationOpts,
   ScreenshotOpts,
+  ReadCanvasOpts,
 } from "./options.ts";
 
 // Network types

@@ -67,6 +67,7 @@ service Browser {
 
   // Screenshot / capture
   rpc Screenshot(ScreenshotRequest) returns (ScreenshotResponse);
+  rpc ReadCanvas(ReadCanvasRequest) returns (ReadCanvasResponse);
 
   // Keyboard / IME (used by the live browser UI on top of the WebRTC stream)
   rpc InsertText(InsertTextRequest) returns (google.protobuf.Empty);
@@ -694,6 +695,53 @@ message ScreenshotResponse {
   int32 width = 2;
   // Image height in physical pixels.
   int32 height = 3;
+}
+
+// ReadCanvas reads the pixels of a single <canvas> element directly in the
+// renderer, bypassing the origin-clean (tainted) security check and without
+// executing page JavaScript — so cross-origin/tainted canvases (common in
+// captchas) can be read. The element is addressed like any other action
+// target: by selector, js_expression, or backend_node_id.
+message ReadCanvasRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+
+  optional int32 backend_node_id = 4;
+  optional string selector = 5;
+  optional string js_expression = 6;
+  // Specific frameId, empty/omitted for main frame, or "ALL_FRAMES".
+  optional string frame_id = 7;
+
+  // Output encoding: "png" (default), "jpeg", "webp", or "rgba" for the raw
+  // unpremultiplied RGBA pixel buffer.
+  optional string format = 8;
+  // Encode quality 0-100 for "jpeg"/"webp" (ignored otherwise). Default 90.
+  optional int32 quality = 9;
+  // Optional sub-rectangle in canvas pixels (mirrors getImageData). The full
+  // canvas is read when sw/sh are omitted or <= 0.
+  optional int32 sx = 10;
+  optional int32 sy = 11;
+  optional int32 sw = 12;
+  optional int32 sh = 13;
+}
+
+message ReadCanvasResponse {
+  bool success = 1;
+  // Frame the canvas was resolved in.
+  string frame_id = 2;
+  // Resolved DevTools backendNodeId of the canvas.
+  int32 backend_node_id = 3;
+  // Encoded image bytes as base64 (PNG by default), or the raw RGBA buffer
+  // when format == "rgba".
+  string data_base64 = 4;
+  // Canvas width in pixels.
+  int32 width = 5;
+  // Canvas height in pixels.
+  int32 height = 6;
+  // Whether the canvas was origin-clean (untainted). Informational only —
+  // the read succeeds regardless.
+  bool origin_clean = 7;
 }
 
 // ──────────────────────────────────────────────────────────────────────

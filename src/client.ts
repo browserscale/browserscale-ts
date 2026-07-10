@@ -21,6 +21,7 @@ import {
   GetDOMHashRequestSchema,
   GetObservationRequestSchema,
   ScreenshotRequestSchema,
+  ReadCanvasRequestSchema,
   SetBlockListRequestSchema,
   SetStaticPathsRequestSchema,
   WaitForAnyRequestRequestSchema,
@@ -55,6 +56,7 @@ import type {
   ObservationResult,
   PageInfo,
   ScreenshotResult,
+  ReadCanvasResult,
   SelectOptionResult,
   WaitResult,
 } from "./types.ts";
@@ -66,6 +68,7 @@ import type {
   LoadHTMLOpts,
   NavigateOpts,
   ScreenshotOpts,
+  ReadCanvasOpts,
   SelectOpts,
   WaitOpts,
 } from "./options.ts";
@@ -923,6 +926,71 @@ export class CloudBrowser {
       dataBase64: resp.dataBase64,
       width: resp.width,
       height: resp.height,
+    };
+  }
+
+  /**
+   * Reads the pixels of a <canvas> element directly in the renderer,
+   * bypassing the origin-clean (tainted) security check and without executing
+   * any page JavaScript — so cross-origin/tainted canvases (common in
+   * captchas) read fine where a normal `toDataURL` / `getImageData` would
+   * throw a SecurityError.
+   *
+   * {@link at} is not a valid target — a real <canvas> element is required.
+   *
+   * @param target - locator for the <canvas>; {@link css}, {@link js} or {@link node}
+   * @param opts - optional `format`, `quality`, sub-rectangle and frame
+   *   override; see {@link ReadCanvasOpts}
+   *
+   * @returns ReadCanvasResult with the base64 image in `dataBase64`, the
+   *   canvas `width`/`height`, resolved `frameId`/`backendNodeId` and the
+   *   `originClean` flag
+   *
+   * @throws INVALID_LOCATOR - target is empty, uses at(x,y), or has multiple targets
+   * @throws ELEMENT_NOT_FOUND - no element matched the locator
+   * @throws FRAME_NOT_FOUND - the requested frame does not exist
+   * @throws TIMEOUT - the operation exceeded the server-side timeout
+   * @throws PAGE_NOT_ALIVE - the page has been closed
+   *
+   * @example
+   * const res = await browser.readCanvas(css("#game canvas"));
+   * await fs.writeFile("canvas.png", Buffer.from(res.dataBase64, "base64"));
+   *
+   * @example
+   * // Read the left half as JPEG at quality 80.
+   * const res = await browser.readCanvas(css("canvas"), {
+   *   format: "jpeg", quality: 80, sw: 150, sh: 300,
+   * });
+   */
+  async readCanvas(
+    target: Locator,
+    opts?: ReadCanvasOpts,
+  ): Promise<ReadCanvasResult> {
+    // A real <canvas> is required — at(x,y) coordinates are not valid here.
+    target.validateTarget("readCanvas", false);
+    const req = create(ReadCanvasRequestSchema, {
+      sessionId: this.sessionId,
+      apiKey: this.apiKey,
+      ...elementFields(target, opts?.inFrame),
+    });
+    if (opts?.format !== undefined) req.format = opts.format;
+    if (opts?.quality !== undefined) req.quality = opts.quality;
+    if (opts?.sw !== undefined && opts?.sh !== undefined &&
+        opts.sw > 0 && opts.sh > 0) {
+      req.sx = opts.sx ?? 0;
+      req.sy = opts.sy ?? 0;
+      req.sw = opts.sw;
+      req.sh = opts.sh;
+    }
+    const resp = await this.client.readCanvas(req);
+    return {
+      success: resp.success,
+      frameId: resp.frameId,
+      backendNodeId: resp.backendNodeId,
+      dataBase64: resp.dataBase64,
+      width: resp.width,
+      height: resp.height,
+      originClean: resp.originClean,
     };
   }
 

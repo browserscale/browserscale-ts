@@ -121,3 +121,32 @@ export interface ScreenshotOpts {
   /** Encode quality 0-100 for "jpeg"/"webp" (ignored for "png"). Default 90. */
   quality?: number;
 }
+
+/** Optional customization for {@link CloudBrowser.readCanvas}. */
+export interface ReadCanvasOpts {
+  /**
+   * Override the locator's frame. Omit to use the locator's own
+   * {@link Locator.inFrame} (or the main frame). Pass a specific
+   * `frameId` or {@link AllFrames} to search elsewhere.
+   */
+  inFrame?: string;
+
+  /**
+   * Output encoding: `"png"` (default), `"jpeg"`, `"webp"`, or `"rgba"` for
+   * the raw unpremultiplied RGBA pixel buffer.
+   */
+  format?: "png" | "jpeg" | "webp" | "rgba";
+
+  /** Encode quality 0-100 for "jpeg"/"webp" (ignored otherwise). Default 90. */
+  quality?: number;
+
+  /**
+   * Optional sub-rectangle in canvas pixels (mirrors
+   * `getImageData(sx, sy, sw, sh)`). The full canvas is read when `sw`/`sh`
+   * are omitted or <= 0.
+   */
+  sx?: number;
+  sy?: number;
+  sw?: number;
+  sh?: number;
+}
