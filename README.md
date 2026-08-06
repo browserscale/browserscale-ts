@@ -1,10 +1,21 @@
-# browserscale-ts — browserscale SDK for TypeScript
+<div align="center">
 
-Official TypeScript SDK for [browserscale](https://browserscale.cloud): real
-Chromium browsers in the cloud, driven over gRPC. Rent an isolated browser
-session in seconds, automate it with human-like input, intercept network
-traffic, solve captchas, and watch a live video stream of everything your
-script does.
+# browserscale-ts
+
+**The official TypeScript SDK for [browserscale](https://browserscale.cloud) — real Chromium browsers in the cloud, driven over gRPC.**
+
+Rent an isolated browser session in seconds, automate it with human-like input, intercept network traffic, solve captchas, and watch a live video stream of everything your script does. Runs in Node.js and the browser.
+
+[![npm](https://img.shields.io/npm/v/browserscale-ts?logo=npm)](https://www.npmjs.com/package/browserscale-ts)
+![Node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)
+![Types](https://img.shields.io/badge/types-included-3178C6?logo=typescript&logoColor=white)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+
+[Install](#install) · [Quickstart](#quickstart) · [Core API](#core-api) · [Docs](#documentation) · [Ecosystem](#ecosystem)
+
+</div>
+
+---
 
 ## Features
 
@@ -64,7 +75,7 @@ script does.
 npm install browserscale-ts
 ```
 
-Requires Node 18+. Ships as an ES module with bundled type declarations.
+Requires **Node 18+**. Ships as an ES module with bundled type declarations.
 
 ## Quickstart
 
@@ -98,6 +109,29 @@ main();
 Run it and you should see `title: Example Domain`. Get an API key from your
 [dashboard](https://browserscale.cloud/dashboard/api-keys).
 
+## Core API
+
+Fully typed and promise-based. Failures throw typed error classes (`ClickError`,
+`WaitError`, `FillError`, …) carrying structured detail — e.g. a `ClickError`
+reports the element that occluded the click.
+
+| Call | What it does |
+| --- | --- |
+| `rentBrowser(cfg)` | Rent a fresh session (`new BrowserConfig(key, secs, host, port, user, pass)`). |
+| `connectSession(grpcUrl, apiKey, sessionId)` | Attach to an existing session by id (from a prior rent). |
+| `browser.navigate(url, opts?)` | Load a URL. |
+| `browser.wait(condition, opts?)` | Wait for a locator condition; returns the matched `frameId`. |
+| `browser.click(target, opts?)` | Human-like click; throws a rich `ClickError` on failure. |
+| `browser.fill(target, text, opts?)` | Per-key typing that fires real input events; `insertText` for bulk commit. |
+| `browser.evaluate(expr)` | Run JS in the page/frame and get a typed value back. |
+| `browser.getObservation(opts?)` | Compact, node-handle-tagged view of interactive elements across frames. |
+| `browser.solveCaptcha(opts?)` | Solve an interactive challenge in the live browser. |
+| `browser.stopBrowser()` | Release the rental. |
+
+Locators: `css(...)`, `js(...)` (target by page logic when CSS can't). Plus
+cookies, storage, network interception, mouse/scroll/drag/select/key events, and
+canvas reads — see the full reference below.
+
 ## Documentation
 
 - [Introduction](https://browserscale.cloud/docs) — what browserscale is, use cases and
@@ -113,10 +147,23 @@ Run it and you should see `title: Example Domain`. Get an API key from your
 - [TypeScript API reference](https://browserscale.cloud/docs/api-reference/ts) —
   every method, type and option with runnable examples
 
-## Go
+## Browser usage
 
-Prefer Go? Use the Go SDK:
-[browserscale-go](https://github.com/browserscale/browserscale-go).
+The default entry point uses native gRPC (Node.js). To drive a session from a
+browser over WebSocket, import the browser build:
+
+```ts
+import { rentBrowser, css } from "browserscale-ts/browser";
+```
+
+## Ecosystem
+
+| Project | Role |
+| --- | --- |
+| **browserscale-ts** (you are here) | The TypeScript SDK (Node.js + browser). |
+| [**browserscale-go**](https://github.com/browserscale/browserscale-go) | The Go SDK. |
+| [**browserscale-cli**](https://github.com/browserscale/browserscale-cli) | `browserscale init` — scaffold a runnable automation module (Go). |
+| [**browserscale-kit**](https://github.com/browserscale/browserscale-kit) | Go toolkit around the browser: config, store, queues, proxies, logging, mail. |
 
 ## License
 
