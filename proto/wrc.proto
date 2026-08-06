@@ -29,17 +29,18 @@ service Browser {
 
   // Evaluation
   rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
+  rpc Run(RunRequest) returns (RunResponse);
 
   // Waiting
   rpc WaitForAny(WaitForAnyParams) returns (WaitResult);
 
   // Element actions
   rpc SelectOption(SelectOptionRequest) returns (SelectOptionResult);
-  rpc ScrollTo(ScrollToRequest) returns (ElementResult);
-  rpc MoveTo(MoveToRequest) returns (ElementResult);
-  rpc Click(ClickRequest) returns (ElementResult);
+  rpc ScrollTo(ScrollToRequest) returns (ScrollResult);
+  rpc MoveTo(MoveToRequest) returns (MoveResult);
+  rpc Click(ClickRequest) returns (ClickResult);
   rpc Drag(DragRequest) returns (DragResult);
-  rpc Fill(FillRequest) returns (ElementResult);
+  rpc Fill(FillRequest) returns (FillResult);
 
   // Network interception
   rpc SetBlockList(SetBlockListRequest) returns (google.protobuf.Empty);
@@ -179,6 +180,35 @@ message WaitResult {
   int32 backend_node_id = 3;
   bool is_visible = 4;
   Rect bounds = 5;
+  // Present iff no condition matched before the deadline (index is -1): the
+  // per-condition breakdown of why nothing matched. A timeout is a normal
+  // result, not an RPC error.
+  optional WaitError error = 6;
+}
+
+// Per-condition diagnostic status returned inside WaitError when WaitForAny
+// times out; one entry per input condition, in the same order.
+message WaitConditionStatus {
+  int32 index = 1;
+  // "not_found" | "found_hidden" | "found_occluded" | "pending_steady".
+  string state = 2;
+  int32 backend_node_id = 3;
+  string frame_id = 4;
+  bool is_visible = 5;
+  optional Rect bounds = 6;
+  // The intercepting element, present iff state == "found_occluded".
+  optional OccluderInfo occluder = 7;
+}
+
+// Error detail for WaitForAny. Present in WaitResult iff no condition matched
+// before the deadline. Same per-command WRCError<Command> convention as
+// ClickError, plus a per-condition breakdown.
+message WaitError {
+  // Machine-stable failure code. Currently always "timeout".
+  string code = 1;
+  string message = 2;
+  // Per-condition status, same order/length as the input conditions.
+  repeated WaitConditionStatus conditions = 3;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -195,6 +225,89 @@ message ElementResult {
   double root_y = 7;
 }
 
+// Describes the element that intercepted a click — the element sitting on top
+// of the target at the intended click point. Coordinates are root-viewport CSS
+// pixels, consistent with ClickResult.bounds.
+message OccluderInfo {
+  int32 backend_node_id = 1;
+  string frame_id = 2;
+  string tag_name = 3;
+  optional string id = 4;
+  optional string class_name = 5;
+  optional string text = 6;
+  Rect bounds = 7;
+  // Computed pointer-events keyword (e.g. "auto", "none", "all"). Lets the
+  // caller tell an invisible pass-through layer from one that genuinely
+  // swallows clicks.
+  optional string pointer_events = 8;
+  // Computed visibility keyword ("visible", "hidden", "collapse").
+  optional string visibility = 9;
+  // Computed opacity (0..1). 0 means visually invisible but may still
+  // intercept clicks depending on pointer_events.
+  optional double opacity = 10;
+  // Computed effective z-index as a string ("0" when auto/not stacked).
+  optional string z_index = 11;
+  // True when this element can intercept clicks even while invisible (computed
+  // pointer-events in {all, painted, fill, stroke}); i.e. a real click here is
+  // swallowed even at visibility:hidden / opacity:0. When false and invisible,
+  // a real click would fall through.
+  optional bool hittable_while_invisible = 12;
+}
+
+// Error detail for a Click that did not land. Present in ClickResult iff
+// success is false. First instance of the per-command WRCError<Command>
+// convention; other commands migrate to the same shape later.
+message ClickError {
+  // Machine-stable failure code, e.g. "occluded_no_reachable_point" or
+  // "occluded_after_evade".
+  string code = 1;
+  string message = 2;
+  // The intercepting element (present for occlusion codes).
+  optional OccluderInfo occluder = 3;
+  // Whether a pointer reposition/evade was attempted before giving up.
+  optional bool evade_attempted = 4;
+}
+
+// ClickResult mirrors ElementResult (field numbers 1-7 kept identical, so it is
+// wire-compatible) plus an optional error describing why the click did not land
+// when success is false. A failed click is a normal response, not an RPC error.
+message ClickResult {
+  bool success = 1;
+  string frame_id = 2;
+  int32 backend_node_id = 3;
+  bool is_visible = 4;
+  Rect bounds = 5;
+  double root_x = 6;
+  double root_y = 7;
+  optional ClickError error = 8;
+}
+
+// Error detail for a Fill that did not complete. Present in FillResult iff
+// success is false. Fill focuses the field with the exact same smart click as
+// Click, so any pre-typing failure is a click failure: code/message mirror it
+// and the full click diagnostics are nested under click_error.
+message FillError {
+  // Mirrored from the underlying click failure: "not_found",
+  // "occluded_no_reachable_point" or "occluded_after_evade".
+  string code = 1;
+  string message = 2;
+  // The underlying click-core failure that prevented focusing/typing.
+  optional ClickError click_error = 3;
+}
+
+// FillResult mirrors the fill return: the success payload plus an optional error
+// when the field could not be focused/typed. Field numbers 1-3/6-7 match
+// ElementResult so it stays wire-compatible; is_visible/bounds are not part of
+// fill's contract.
+message FillResult {
+  bool success = 1;
+  string frame_id = 2;
+  int32 backend_node_id = 3;
+  double root_x = 6;
+  double root_y = 7;
+  optional FillError error = 8;
+}
+
 message DragResult {
   bool success = 1;
   string frame_id = 2;
@@ -203,12 +316,78 @@ message DragResult {
   double start_y = 5;
   double end_x = 6;
   double end_y = 7;
+  optional DragError error = 8;
+}
+
+// Error detail for a Drag whose source pickup failed. Present in DragResult iff
+// success is false. Drag acquires+presses the source with the same smart click
+// as Click, so a pre-drag failure is a click failure: code/message mirror it
+// and the full click diagnostics are nested under click_error.
+message DragError {
+  string code = 1;
+  string message = 2;
+  optional ClickError click_error = 3;
 }
 
 message SelectOptionResult {
   int32 selected_index = 1;
   string selected_value = 2;
   string selected_text = 3;
+  bool success = 4;
+  optional SelectOptionError error = 5;
+}
+
+// Error detail for a SelectOption that failed. Present iff success is false.
+// selectOption is programmatic (no pointer gate), so it only reports semantic
+// failures.
+message SelectOptionError {
+  // "not_found" (the <select> was not located) or "option_not_found" (no option
+  // matched the requested index/value/text).
+  string code = 1;
+  string message = 2;
+}
+
+// ScrollResult mirrors the scrollTo return: the success payload plus an optional
+// error when the target could not be located/scrolled. Field numbers 1-5 match
+// ElementResult so it stays wire-compatible; scrollTo returns no root_x/root_y.
+message ScrollResult {
+  bool success = 1;
+  string frame_id = 2;
+  int32 backend_node_id = 3;
+  bool is_visible = 4;
+  Rect bounds = 5;
+  optional ScrollError error = 8;
+}
+
+// Error detail for a ScrollTo that failed. Present iff success is false; the
+// only semantic failure is the target not being locatable/scrollable.
+message ScrollError {
+  // Currently always "not_found".
+  string code = 1;
+  string message = 2;
+}
+
+// MoveResult mirrors the moveTo return: the success payload plus an optional
+// error when the target could not be located. Field numbers 1-7 match
+// ElementResult so it stays wire-compatible.
+message MoveResult {
+  bool success = 1;
+  string frame_id = 2;
+  int32 backend_node_id = 3;
+  bool is_visible = 4;
+  Rect bounds = 5;
+  double root_x = 6;
+  double root_y = 7;
+  optional MoveError error = 8;
+}
+
+// Error detail for a MoveTo that failed. Present iff success is false; a move
+// has no occlusion notion, so the only failure is the target not being
+// locatable.
+message MoveError {
+  // Currently always "not_found".
+  string code = 1;
+  string message = 2;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -283,6 +462,25 @@ message EvaluateResponse {
   int32 backend_node_id = 2;
   bool is_visible = 3;
   Rect bounds = 4;
+}
+
+// Run executes a JavaScript automation script inside the God-VM — a bare V8
+// isolate that lives outside every renderer.
+message RunRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // JavaScript source to execute in the God-VM.
+  string source = 3;
+  // Page the script should be able to drive (reserved; frame bridge wired in a
+  // follow-up). Optional for now — ignored server-side.
+  optional string page_id = 4;
+}
+
+message RunResponse {
+  // False if compilation or execution threw; then `result` holds the message.
+  bool success = 1;
+  // JSON-serialized result value (or "undefined"), or the error message.
+  string result = 2;
 }
 
 // ──────────────────────────────────────────────────────────────────────

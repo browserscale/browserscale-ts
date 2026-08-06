@@ -78,9 +78,7 @@ import type { StorageOriginEntry } from "./storage.ts";
 import {
   cookieParamFromProto,
   cookieParamsToProto,
-  dragResultFromProto,
   elementFields,
-  elementResultFromProto,
   headerModsToProto,
   headersToProto,
   interceptedRequestFromProto,
@@ -90,7 +88,13 @@ import {
   splitRequestPatterns,
   storageEntriesToProto,
   storageEntryFromProto,
-  waitResultFromProto,
+  unwrapClick,
+  unwrapDrag,
+  unwrapFill,
+  unwrapMove,
+  unwrapScroll,
+  unwrapSelect,
+  unwrapWait,
 } from "./internal/convert.ts";
 
 type BrowserRpcClient = Client<typeof Browser>;
@@ -420,7 +424,10 @@ export class CloudBrowser {
    *
    * @returns WaitResult for the first matching condition
    *
-   * @throws UNKNOWN_ERROR - the wait timed out or a condition was invalid
+   * @throws {@link WaitError} - no condition matched before the deadline;
+   *   `.conditions` holds the per-condition breakdown of why each never matched
+   * @throws {@link BrowserScaleError} - a condition was invalid, or a
+   *   server/transport error occurred
    *
    * @example
    * const r = await browser.waitAny(
@@ -465,8 +472,7 @@ export class CloudBrowser {
     });
     if (frameId) req.frameId = frameId;
 
-    const resp = await this.client.waitForAny(req);
-    return waitResultFromProto(resp);
+    return unwrapWait(await this.client.waitForAny(req));
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -491,15 +497,18 @@ export class CloudBrowser {
    *   post-scroll isVisible, element bounds, and the root-viewport
    *   (rootX, rootY) where the click landed
    *
-   * @throws INVALID_LOCATOR - target is empty or has multiple targets set
-   * @throws ELEMENT_NOT_FOUND - no element matched the locator
-   * @throws FRAME_NOT_FOUND - the requested frame does not exist
-   * @throws CLICK_FAILED - the click could not be dispatched
-   * @throws TIMEOUT - the operation exceeded the server-side timeout
-   * @throws PAGE_NOT_ALIVE - the page has been closed
+   * @throws {@link ClickError} - the target was found but the click could not
+   *   land because another element covered it; `.code`, `.occluder` and
+   *   `.result` describe the blocker and the resolved coordinates
+   * @throws {@link BrowserScaleError} - invalid locator, or a server/transport
+   *   error (element not found, frame not found, timeout, page closed)
    *
    * @example
-   * await browser.click(css("button.submit"));
+   * try {
+   *   await browser.click(css("button.submit"));
+   * } catch (e) {
+   *   if (e instanceof ClickError) console.log(e.code, e.occluder?.tagName);
+   * }
    *
    * @example
    * // Right double-click on a context menu trigger.
@@ -515,8 +524,7 @@ export class CloudBrowser {
     if (opts?.button) req.button = opts.button;
     if (opts?.clickCount) req.clickCount = opts.clickCount;
     if (opts?.action) req.action = opts.action;
-    const resp = await this.client.click(req);
-    return elementResultFromProto(resp);
+    return unwrapClick(await this.client.click(req));
   }
 
   /**
@@ -538,12 +546,10 @@ export class CloudBrowser {
    * @returns ElementResult with success, resolved frameId, backendNodeId
    *   and the root-viewport (rootX, rootY) where the element was clicked
    *
-   * @throws INVALID_LOCATOR - target is empty or has multiple targets set
-   * @throws ELEMENT_NOT_FOUND - no element matched the locator
-   * @throws FRAME_NOT_FOUND - the requested frame does not exist
-   * @throws FILL_FAILED - the input could not be filled
-   * @throws TIMEOUT - the operation exceeded the server-side timeout
-   * @throws PAGE_NOT_ALIVE - the page has been closed
+   * @throws {@link FillError} - the field could not be focused/typed; `.code`
+   *   and `.clickError` (the underlying click-core failure) describe why
+   * @throws {@link BrowserScaleError} - invalid locator, or a server/transport
+   *   error (element not found, frame not found, timeout, page closed)
    *
    * @example
    * await browser.fill(css("input[name=email]"), "user@example.com");
@@ -561,8 +567,7 @@ export class CloudBrowser {
       ...elementFields(target, opts?.inFrame),
     });
     if (opts?.clearFirst) req.clearFirst = true;
-    const resp = await this.client.fill(req);
-    return elementResultFromProto(resp);
+    return unwrapFill(await this.client.fill(req));
   }
 
   /**
@@ -578,7 +583,9 @@ export class CloudBrowser {
    *   post-scroll isVisible, element bounds and the root-viewport
    *   (rootX, rootY) where the cursor ended up
    *
-   * @throws UNKNOWN_ERROR - the move could not be completed
+   * @throws {@link MoveError} - the target could not be located (`.code` is
+   *   `"not_found"`); `.result` carries the resolved payload
+   * @throws {@link BrowserScaleError} - invalid locator or a server/transport error
    *
    * @example
    * await browser.moveTo(css("nav .menu"));
@@ -590,8 +597,7 @@ export class CloudBrowser {
       apiKey: this.apiKey,
       ...elementFields(target),
     });
-    const resp = await this.client.moveTo(req);
-    return elementResultFromProto(resp);
+    return unwrapMove(await this.client.moveTo(req));
   }
 
   /**
@@ -608,7 +614,9 @@ export class CloudBrowser {
    * @returns ElementResult with the resolved frameId, backendNodeId,
    *   post-scroll isVisible and the element's bounds after the scroll
    *
-   * @throws UNKNOWN_ERROR - the element could not be scrolled into view
+   * @throws {@link ScrollError} - the target could not be located/scrolled
+   *   (`.code` is `"not_found"`); `.result` carries the resolved payload
+   * @throws {@link BrowserScaleError} - invalid locator or a server/transport error
    *
    * @example
    * await browser.scrollTo(css("#footer"));
@@ -620,8 +628,7 @@ export class CloudBrowser {
       apiKey: this.apiKey,
       ...elementFields(target),
     });
-    const resp = await this.client.scrollTo(req);
-    return elementResultFromProto(resp);
+    return unwrapScroll(await this.client.scrollTo(req));
   }
 
   /**
@@ -640,7 +647,9 @@ export class CloudBrowser {
    * @returns DragResult with the resolved frameId, backendNodeId and the
    *   final cursor position (rootX, rootY) where the drop happened
    *
-   * @throws UNKNOWN_ERROR - the drag could not be performed
+   * @throws {@link DragError} - the source could not be acquired/pressed;
+   *   `.code` and `.clickError` describe the underlying click-core failure
+   * @throws {@link BrowserScaleError} - invalid locator or a server/transport error
    *
    * @example
    * await browser.dragBy(css(".slider .handle"), 120, 0);
@@ -666,7 +675,9 @@ export class CloudBrowser {
    * @returns DragResult with the resolved frameId, backendNodeId and the
    *   final cursor position (rootX, rootY) where the drop happened
    *
-   * @throws UNKNOWN_ERROR - the drag could not be performed
+   * @throws {@link DragError} - the source could not be acquired/pressed;
+   *   `.code` and `.clickError` describe the underlying click-core failure
+   * @throws {@link BrowserScaleError} - invalid locator or a server/transport error
    *
    * @example
    * await browser.dragTo(css(".card"), 800, 400);
@@ -693,8 +704,7 @@ export class CloudBrowser {
     if (spec.offsetY !== undefined) req.offsetY = spec.offsetY;
     if (spec.absoluteX !== undefined) req.absoluteX = spec.absoluteX;
     if (spec.absoluteY !== undefined) req.absoluteY = spec.absoluteY;
-    const resp = await this.client.drag(req);
-    return dragResultFromProto(resp);
+    return unwrapDrag(await this.client.drag(req));
   }
 
   /**
@@ -715,13 +725,10 @@ export class CloudBrowser {
    * @returns SelectOptionResult with the resolved selectedIndex,
    *   selectedValue and selectedText after the change
    *
-   * @throws INVALID_LOCATOR - target is empty or has multiple targets set
-   * @throws ELEMENT_NOT_FOUND - no element matched the locator
-   * @throws FRAME_NOT_FOUND - the requested frame does not exist
-   * @throws SELECT_FAILED - the option could not be selected
-   *   (out of range, or element is not a `<select>`)
-   * @throws TIMEOUT - the operation exceeded the server-side timeout
-   * @throws PAGE_NOT_ALIVE - the page has been closed
+   * @throws {@link SelectOptionError} - the option could not be selected;
+   *   `.code` is `"not_found"` (no `<select>`) or `"option_not_found"`
+   * @throws {@link BrowserScaleError} - invalid locator, or a server/transport
+   *   error (frame not found, timeout, page closed)
    *
    * @example
    * await browser.selectByIndex(css("select#country"), 2);
@@ -787,12 +794,7 @@ export class CloudBrowser {
     });
     withKey(req);
     if (opts?.fireEvents === false) req.fireEvents = false;
-    const resp = await this.client.selectOption(req);
-    return {
-      selectedIndex: resp.selectedIndex,
-      selectedValue: resp.selectedValue,
-      selectedText: resp.selectedText,
-    };
+    return unwrapSelect(await this.client.selectOption(req));
   }
 
   // ──────────────────────────────────────────────────────────────────

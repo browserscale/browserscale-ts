@@ -17,8 +17,17 @@ export {
   DefaultSteadyMs,
 } from "./defaults.ts";
 
-// Errors
-export { BrowserScaleError } from "./errors.ts";
+// Errors — base class plus the typed semantic-failure subclasses
+export {
+  BrowserScaleError,
+  ClickError,
+  FillError,
+  DragError,
+  ScrollError,
+  MoveError,
+  SelectOptionError,
+  WaitError,
+} from "./errors.ts";
 
 // Plain user-facing types
 export type {
@@ -29,6 +38,8 @@ export type {
   InterceptedRequest,
   InterceptedResponse,
   WaitResult,
+  WaitConditionStatus,
+  OccluderInfo,
   NavigateResult,
   EvaluateResult,
   ElementResult,

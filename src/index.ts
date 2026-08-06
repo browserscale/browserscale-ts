@@ -18,8 +18,17 @@ export {
   DefaultSteadyMs,
 } from "./defaults.ts";
 
-// Errors
-export { BrowserScaleError } from "./errors.ts";
+// Errors — base class plus the typed semantic-failure subclasses
+export {
+  BrowserScaleError,
+  ClickError,
+  FillError,
+  DragError,
+  ScrollError,
+  MoveError,
+  SelectOptionError,
+  WaitError,
+} from "./errors.ts";
 
 // Plain user-facing types
 export type {
@@ -30,6 +39,8 @@ export type {
   InterceptedRequest,
   InterceptedResponse,
   WaitResult,
+  WaitConditionStatus,
+  OccluderInfo,
   NavigateResult,
   EvaluateResult,
   ElementResult,
@@ -126,6 +137,40 @@ export async function rentBrowser(config: BrowserConfig): Promise<CloudBrowser> 
 
   return new CloudBrowser(transport, rentResp.sessionId, config.apiKey, rentResp.fingerprint, async () => {
     await callStopApi(config.apiKey, rentResp.sessionId);
+  });
+}
+
+/**
+ * Attaches to an already-rented session over a fresh gRPC connection.
+ *
+ * Useful when a session id (and its gRPC URL) was persisted across processes
+ * and you want to drive it again without renting a new one. Mirrors
+ * browserscale-go's `ConnectSession`. Closing the returned handle via
+ * {@link CloudBrowser.stopBrowser} releases the rental (calls the stop
+ * endpoint) and closes the transport.
+ *
+ * @param grpcUrl - session host gRPC URL from the original rent (grpc:// or grpcs://)
+ * @param apiKey - API key the session was rented with
+ * @param sessionId - id of the existing session
+ *
+ * @returns CloudBrowser attached to the existing session
+ *
+ * @example
+ * const browser = connectSession(grpcUrl, apiKey, sessionId);
+ * try {
+ *   await browser.navigate("https://example.com");
+ * } finally {
+ *   await browser.stopBrowser();
+ * }
+ */
+export function connectSession(
+  grpcUrl: string,
+  apiKey: string,
+  sessionId: string,
+): CloudBrowser {
+  const transport = createGrpcTransport({ baseUrl: grpcBaseUrl(grpcUrl) });
+  return new CloudBrowser(transport, sessionId, apiKey, "", async () => {
+    await callStopApi(apiKey, sessionId);
   });
 }
 
