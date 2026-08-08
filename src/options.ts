@@ -5,6 +5,8 @@
 // `inFrame` on each opts struct wins over the locator's own .inFrame(...)
 // chain — useful when reusing a locator across frames.
 
+import type { Locator } from "./locator.ts";
+
 /** Mouse button used by {@link CloudBrowser.click}. */
 export type Button = "left" | "right" | "middle";
 
@@ -38,6 +40,29 @@ export interface ClickOpts {
 }
 
 /**
+ * Optional customization for {@link CloudBrowser.addReaction}. All fields are
+ * optional; missing or zero values mean "use the server default".
+ */
+export interface ReactionOpts {
+  /**
+   * Override the click target. Omit to click the matched element itself.
+   * Provide a `css()`/`js()` {@link Locator} to click a different element,
+   * resolved in the matched element's frame (e.g. a modal's close "X").
+   * `node()`/`at()` locators are rejected.
+   */
+  on?: Locator;
+
+  /** Mouse button for the click. Default `"left"`. */
+  button?: Button;
+
+  /** `1` = single click (default), `2` = double-click. */
+  clickCount?: number;
+
+  /** Poll cadence in milliseconds for the shared page loop. Default 300. */
+  intervalMs?: number;
+}
+
+/**
  * Optional customization for {@link CloudBrowser.fill}. All fields are
  * optional; missing values mean "use the server default".
  */
@@ -55,6 +80,19 @@ export interface FillOpts {
    * in the field.
    */
   clearFirst?: boolean;
+
+  /**
+   * Budget in ms to make the field focusable+clickable (locate, scroll,
+   * settle, un-occlude), mirroring the click timeout. Omit for the server
+   * default (5000). `0` makes fill one-shot (no retry).
+   */
+  timeoutMs?: number;
+
+  /**
+   * Settle window in ms before the focus click, mirroring the click
+   * steady-time. Omit for the server default (750). `0` skips settling.
+   */
+  steadyMs?: number;
 }
 
 /**

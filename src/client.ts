@@ -36,10 +36,17 @@ import {
   InspectAtPositionRequestSchema,
   HighlightNodeRequestSchema,
   InsertTextRequestSchema,
+  TypeRequestSchema,
   PressKeyRequestSchema,
   ReleaseKeyRequestSchema,
   GetSelectionRequestSchema,
   SolveCaptchaRequestSchema,
+  GetStreamConfigRequestSchema,
+  StartStreamRequestSchema,
+  StopStreamRequestSchema,
+  AddReactionRequestSchema,
+  RemoveReactionRequestSchema,
+  ListReactionsRequestSchema,
 } from "./gen/wrc_pb.ts";
 import type { Locator } from "./locator.ts";
 import { DefaultWaitTimeoutMs } from "./defaults.ts";
@@ -59,6 +66,8 @@ import type {
   ReadCanvasResult,
   SelectOptionResult,
   WaitResult,
+  IceServer,
+  ReactionInfo,
 } from "./types.ts";
 import type {
   ClickOpts,
@@ -67,6 +76,7 @@ import type {
   GetObservationOpts,
   LoadHTMLOpts,
   NavigateOpts,
+  ReactionOpts,
   ScreenshotOpts,
   ReadCanvasOpts,
   SelectOpts,
@@ -567,6 +577,8 @@ export class CloudBrowser {
       ...elementFields(target, opts?.inFrame),
     });
     if (opts?.clearFirst) req.clearFirst = true;
+    if (opts?.timeoutMs !== undefined) req.timeout = opts.timeoutMs;
+    if (opts?.steadyMs !== undefined) req.steadyTime = opts.steadyMs;
     return unwrapFill(await this.client.fill(req));
   }
 
@@ -1447,6 +1459,43 @@ export class CloudBrowser {
   }
 
   /**
+   * Types `text` into the currently focused element as a per-key stream of real
+   * keyboard events (keyDown/char/keyUp with the context's QWERTZ/QWERTY layout
+   * and human cadence) — unlike {@link insertText}, a single IME-style commit
+   * with no key events.
+   *
+   * `type` is intentionally UNtargeted and loose: it does not locate or focus
+   * any element and does NOT pin focus, so the page is free to route keys and
+   * move focus between fields mid-stream — ideal for one-time-code / OTP inputs
+   * that auto-advance to the next box on each digit. To type one specific field
+   * that must stay focused for the whole value, use {@link fill} instead
+   * (strict, target-bound, per-key focus-verified).
+   *
+   * Nothing is focused for you: {@link click} (or {@link fill}) the field first,
+   * or otherwise ensure focus, before calling `type`.
+   *
+   * @param text - the text to type as real key events
+   * @param opts - optional: `clearFirst` clears the focused field (Ctrl+A,
+   *   Delete) before typing
+   *
+   * @throws UNKNOWN_ERROR - the page/context was torn down mid-stream
+   *
+   * @example
+   * // OTP field that auto-advances across boxes.
+   * await browser.click(css("input.otp-0"));
+   * await browser.type("123456");
+   */
+  async type(text: string, opts?: { clearFirst?: boolean }): Promise<void> {
+    const req = create(TypeRequestSchema, {
+      sessionId: this.sessionId,
+      apiKey: this.apiKey,
+      text,
+    });
+    if (opts?.clearFirst) req.clearFirst = true;
+    await this.client.type(req);
+  }
+
+  /**
    * Fires a single key-down event.
    *
    * Only the keydown half is dispatched — pair with {@link releaseKey} for
@@ -1568,5 +1617,213 @@ export class CloudBrowser {
       }),
     );
     return resp.result;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Live streaming (WebRTC)
+  // ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Returns the ICE servers (TURN URL + short-lived credentials) to put in
+   * your `RTCPeerConnection` BEFORE creating the offer, so it can gather relay
+   * candidates.
+   *
+   * Live streaming is a two-step, client-offerer handshake: call
+   * `getStreamConfig`, build your peer with the returned servers, create an
+   * offer, then pass its SDP to {@link startStream} and apply the answer.
+   *
+   * @returns the ICE servers for the client `RTCPeerConnection`
+   *
+   * @throws UNKNOWN_ERROR - TURN is not configured on the server
+   *
+   * @example
+   * const ice = await browser.getStreamConfig();
+   * const pc = new RTCPeerConnection({ iceServers: ice });
+   */
+  async getStreamConfig(): Promise<IceServer[]> {
+    const resp = await this.client.getStreamConfig(
+      create(GetStreamConfigRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+      }),
+    );
+    return resp.iceServers.map((s) => ({
+      urls: s.urls,
+      username: s.username ?? "",
+      credential: s.credential ?? "",
+    }));
+  }
+
+  /**
+   * Answers your WebRTC SDP offer and starts streaming the page as a video
+   * track, returning the SDP answer to set as your peer's remote description.
+   * The browser is the answerer; you are the offerer (see
+   * {@link getStreamConfig} for the credentials to build the offer).
+   *
+   * @param offerSdp - your `RTCPeerConnection`'s SDP offer
+   *
+   * @returns the SDP answer to apply as the remote description
+   *
+   * @throws UNKNOWN_ERROR - the offer was empty, TURN is unconfigured, or the
+   *   browser could not negotiate the stream
+   *
+   * @example
+   * const answer = await browser.startStream(offer.sdp);
+   * await pc.setRemoteDescription({ type: "answer", sdp: answer });
+   */
+  async startStream(offerSdp: string): Promise<string> {
+    const resp = await this.client.startStream(
+      create(StartStreamRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+        offerSdp,
+      }),
+    );
+    return resp.answerSdp;
+  }
+
+  /**
+   * Tears down the live video stream for the session's page. Safe to call even
+   * if no stream is running.
+   *
+   * @throws UNKNOWN_ERROR - the stream could not be stopped
+   *
+   * @example
+   * await browser.stopStream();
+   */
+  async stopStream(): Promise<void> {
+    await this.client.stopStream(
+      create(StopStreamRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+      }),
+    );
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Reactions
+  // ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Registers a one-shot "reaction": a background poller (one shared loop per
+   * page) watches for the `match` locator and, as soon as it matches, clicks it
+   * with the full smart-click machinery (scroll, human path, occlusion gate,
+   * evade) — then removes itself. The poller yields to any in-flight input
+   * action and only fires while the pointer is idle, so a reaction naturally
+   * slots into the gaps of a retrying foreground action (e.g. it dismisses a
+   * newsletter modal blocking a {@link CloudBrowser.click}, after which the
+   * click's own retry succeeds). Reactions are scoped to the page and torn
+   * down automatically when the page/session ends.
+   *
+   * `match` must be a `css()` or `js()` {@link Locator} — `node()`/`at()` are
+   * rejected. Use `.inAllFrames()` to watch every frame and `.visible(false)`
+   * to opt out of the default visibility gate. Pass a `ReactionOpts` to click a
+   * different target (`on`), change the button/click count, or the poll cadence.
+   *
+   * @param match - the css()/js() locator to watch for
+   * @param opts - optional reaction customization; see {@link ReactionOpts}
+   *
+   * @returns the reactionId (pass to {@link CloudBrowser.removeReaction})
+   *
+   * @throws {@link BrowserScaleError} - `match` (or `opts.on`) is not a css()/js()
+   *   locator, or a server/transport error
+   *
+   * @example
+   * // Auto-dismiss a consent button whenever it appears, in any frame.
+   * const id = await browser.addReaction(css("button#accept").inAllFrames());
+   *
+   * @example
+   * // Watch for a newsletter modal, but click its close "X" instead.
+   * const id = await browser.addReaction(css("#newsletter-modal"), {
+   *   on: css(".modal-close"),
+   * });
+   */
+  async addReaction(match: Locator, opts?: ReactionOpts): Promise<string> {
+    this.assertReactionLocator("addReaction", match, "match");
+    const req = create(AddReactionRequestSchema, {
+      sessionId: this.sessionId,
+      apiKey: this.apiKey,
+    });
+    if (match.selector) req.matchSelector = match.selector;
+    if (match.jsExpression) req.matchJsExpression = match.jsExpression;
+    if (match.frameId) req.frameId = match.frameId;
+    if (match.visibleFlag !== undefined) req.visible = match.visibleFlag;
+    if (opts?.on) {
+      this.assertReactionLocator("addReaction", opts.on, "on");
+      if (opts.on.selector) req.actionSelector = opts.on.selector;
+      if (opts.on.jsExpression) req.actionJsExpression = opts.on.jsExpression;
+    }
+    if (opts?.button) req.button = opts.button;
+    if (opts?.clickCount) req.clickCount = opts.clickCount;
+    if (opts?.intervalMs) req.interval = opts.intervalMs;
+    const resp = await this.client.addReaction(req);
+    return resp.reactionId;
+  }
+
+  /**
+   * Removes a pending reaction by id. Returns `false` if the reaction had
+   * already fired (one-shot) or was never registered.
+   *
+   * @param reactionId - id returned by {@link CloudBrowser.addReaction}
+   *
+   * @returns true if a pending reaction with this id existed and was removed
+   *
+   * @example
+   * const removed = await browser.removeReaction(id);
+   */
+  async removeReaction(reactionId: string): Promise<boolean> {
+    const resp = await this.client.removeReaction(
+      create(RemoveReactionRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+        reactionId,
+      }),
+    );
+    return resp.removed;
+  }
+
+  /**
+   * Returns the still-pending reactions registered for the current page.
+   * Reactions that have already fired (one-shot) are not included.
+   *
+   * @returns the pending reactions for the page
+   *
+   * @example
+   * const pending = await browser.listReactions();
+   * for (const r of pending) console.log(r.reactionId, r.matchSelector);
+   */
+  async listReactions(): Promise<ReactionInfo[]> {
+    const resp = await this.client.listReactions(
+      create(ListReactionsRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+      }),
+    );
+    return resp.reactions.map((r) => ({
+      reactionId: r.reactionId,
+      matchSelector: r.matchSelector ?? "",
+      matchJsExpression: r.matchJsExpression ?? "",
+      actionSelector: r.actionSelector ?? "",
+      actionJsExpression: r.actionJsExpression ?? "",
+      frameId: r.frameId,
+      visible: r.visible,
+    }));
+  }
+
+  /**
+   * @internal — a reaction match/action must be a css()/js() locator: node()
+   * and at() are rejected (a reaction watches for a condition, like a wait).
+   */
+  private assertReactionLocator(cmd: string, l: Locator, role: string): void {
+    if (l.backendNodeId !== 0 || l.x !== undefined || l.y !== undefined) {
+      throw new BrowserScaleError(
+        `browserscale.${cmd}: ${role} must be a css()/js() locator (node()/at() are not valid)`,
+      );
+    }
+    if (!l.selector && !l.jsExpression) {
+      throw new BrowserScaleError(
+        `browserscale.${cmd}: ${role} must have a CSS selector or JS expression`,
+      );
+    }
   }
 }

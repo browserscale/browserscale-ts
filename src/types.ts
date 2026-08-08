@@ -113,6 +113,32 @@ export interface OccluderInfo {
 }
 
 /**
+ * ElementRef is a lightweight descriptor of an element — enough to identify it
+ * (and decide what to do) without another DOM round-trip. It names the element
+ * that stole focus in a {@link FillError} focus-loss failure.
+ */
+export interface ElementRef {
+  backendNodeId: number;
+  /** Upper-case tag name, e.g. "INPUT", "BUTTON", "DIV". */
+  tagName: string;
+  /** id attribute, if present. */
+  id?: string;
+  /** name attribute, if present. */
+  name?: string;
+  /** class attribute, if present. */
+  className?: string;
+  /** `<input>` type, if the element is an `<input>`. */
+  inputType?: string;
+  /** Whitespace-collapsed textContent/value snippet (max 120 chars). */
+  text?: string;
+  /**
+   * Whether this element is itself an editable text sink (input / textarea /
+   * contenteditable).
+   */
+  editable: boolean;
+}
+
+/**
  * WaitConditionStatus is the per-condition diagnostic carried by
  * {@link WaitError} when a {@link CloudBrowser.wait} times out: one entry per
  * condition (in the order they were passed) explaining why it never matched.
@@ -267,4 +293,40 @@ export interface RentResponse {
   timezone: string;
   acceptLanguage: string;
   fingerprint: string;
+}
+
+/**
+ * IceServer is one entry for a WebRTC `RTCPeerConnection`'s `iceServers`
+ * config: a TURN (or STUN) URL plus the short-lived credentials to
+ * authenticate with it. Pass these to your peer before creating the offer.
+ */
+export interface IceServer {
+  /** ICE server URLs (e.g. `turn:relay.example.com:3478?transport=udp`). */
+  urls: string[];
+  /** Short-lived TURN REST username (empty for plain STUN). */
+  username: string;
+  /** Short-lived TURN REST credential (empty for plain STUN). */
+  credential: string;
+}
+
+/**
+ * ReactionInfo describes a still-pending reaction, as returned by
+ * {@link CloudBrowser.listReactions}. One-shot reactions that have already
+ * fired are gone and never appear here.
+ */
+export interface ReactionInfo {
+  /** Stable id assigned by {@link CloudBrowser.addReaction} (pass to removeReaction). */
+  reactionId: string;
+  /** Set if the reaction matches by CSS selector. */
+  matchSelector: string;
+  /** Set if the reaction matches by JS expression. */
+  matchJsExpression: string;
+  /** Set if the click target differs from the matched element. */
+  actionSelector: string;
+  /** Set if the click target differs from the matched element. */
+  actionJsExpression: string;
+  /** Frame scope: `""` for the main frame, a specific frameId, or `AllFrames`. */
+  frameId: string;
+  /** Whether the match additionally requires the element to be visible. */
+  visible: boolean;
 }

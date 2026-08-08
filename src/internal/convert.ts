@@ -13,6 +13,7 @@ import {
   type WaitResult as ProtoWaitResult,
   type ClickError as ProtoClickError,
   type OccluderInfo as ProtoOccluderInfo,
+  type ElementRef as ProtoElementRef,
   type WaitConditionStatus as ProtoWaitConditionStatus,
   type FrameInfo as ProtoFrameInfo,
   type PageInfo as ProtoPageInfo,
@@ -31,6 +32,7 @@ import {
 } from "../gen/wrc_pb.ts";
 import type {
   DragResult,
+  ElementRef,
   ElementResult,
   FrameInfo,
   Header,
@@ -165,6 +167,22 @@ function clickDetailFromProto(e?: ProtoClickError): ClickError | undefined {
   });
 }
 
+// Lightweight element descriptor, surfaced inside a FillError to name the
+// element that stole focus in a focus-loss failure.
+function elementRefFromProto(e?: ProtoElementRef): ElementRef | undefined {
+  if (!e) return undefined;
+  return {
+    backendNodeId: e.backendNodeId,
+    tagName: e.tagName,
+    id: e.id,
+    name: e.name,
+    className: e.className,
+    inputType: e.inputType,
+    text: e.text,
+    editable: e.editable,
+  };
+}
+
 /** Maps a ClickResult to ElementResult; throws {@link ClickError} when the click did not land. */
 export function unwrapClick(r: ProtoClickResult): ElementResult {
   const res = elementResult(r, r.isVisible, rectFromProto(r.bounds), r.rootX, r.rootY);
@@ -189,6 +207,10 @@ export function unwrapFill(r: ProtoFillResult): ElementResult {
       code: r.error.code,
       message: r.error.message,
       clickError: clickDetailFromProto(r.error.clickError),
+      focusedBackendNodeId: r.error.focusedBackendNodeId,
+      focusedElement: elementRefFromProto(r.error.focusedElement),
+      targetEditable: r.error.targetEditable,
+      targetValueLength: r.error.targetValueLength,
       result: res,
     });
   }

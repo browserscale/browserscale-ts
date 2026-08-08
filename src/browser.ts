@@ -40,6 +40,7 @@ export type {
   WaitResult,
   WaitConditionStatus,
   OccluderInfo,
+  ElementRef,
   NavigateResult,
   EvaluateResult,
   ElementResult,

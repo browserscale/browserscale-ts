@@ -41,6 +41,7 @@ export type {
   WaitResult,
   WaitConditionStatus,
   OccluderInfo,
+  ElementRef,
   NavigateResult,
   EvaluateResult,
   ElementResult,
@@ -52,6 +53,8 @@ export type {
   DOMResult,
   InspectResult,
   RentResponse,
+  IceServer,
+  ReactionInfo,
 } from "./types.ts";
 
 // Option bags
@@ -60,6 +63,7 @@ export type {
   ClickAction,
   ClickOpts,
   FillOpts,
+  ReactionOpts,
   SelectOpts,
   WaitOpts,
   WaitUntil,

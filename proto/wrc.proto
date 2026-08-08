@@ -42,6 +42,13 @@ service Browser {
   rpc Drag(DragRequest) returns (DragResult);
   rpc Fill(FillRequest) returns (FillResult);
 
+  // Reactions — one-shot background auto-click when a condition matches. A
+  // shared per-page poller fires only while the pointer is idle, so a reaction
+  // slots into the gaps of a retrying foreground action.
+  rpc AddReaction(AddReactionRequest) returns (AddReactionResponse);
+  rpc RemoveReaction(RemoveReactionRequest) returns (RemoveReactionResponse);
+  rpc ListReactions(ListReactionsRequest) returns (ListReactionsResponse);
+
   // Network interception
   rpc SetBlockList(SetBlockListRequest) returns (google.protobuf.Empty);
   rpc SetStaticPaths(SetStaticPathsRequest) returns (google.protobuf.Empty);
@@ -72,12 +79,22 @@ service Browser {
 
   // Keyboard / IME (used by the live browser UI on top of the WebRTC stream)
   rpc InsertText(InsertTextRequest) returns (google.protobuf.Empty);
+  rpc Type(TypeRequest) returns (google.protobuf.Empty);
   rpc PressKey(PressKeyRequest) returns (google.protobuf.Empty);
   rpc ReleaseKey(ReleaseKeyRequest) returns (google.protobuf.Empty);
   rpc GetSelection(GetSelectionRequest) returns (GetSelectionResponse);
 
   // Captcha solver
   rpc SolveCaptcha(SolveCaptchaRequest) returns (SolveCaptchaResponse);
+
+  // Live streaming (WebRTC). The page is streamed as a video track over a
+  // WebRTC PeerConnection whose media is relayed through the TURN server. The
+  // caller creates the offer (client-offerer); the browser answers it.
+  // GetStreamConfig first hands out the ICE servers the client needs to build
+  // that offer.
+  rpc GetStreamConfig(GetStreamConfigRequest) returns (GetStreamConfigResponse);
+  rpc StartStream(StartStreamRequest) returns (StartStreamResponse);
+  rpc StopStream(StopStreamRequest) returns (StopStreamResponse);
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -282,17 +299,127 @@ message ClickResult {
   optional ClickError error = 8;
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Reactions
+// ──────────────────────────────────────────────────────────────────────
+
+// ReactionInfo (WRC.pdl ReactionInfo) describes a still-pending reaction as
+// returned by ListReactions. One-shot reactions that already fired are gone.
+message ReactionInfo {
+  // Stable id assigned by AddReaction; pass to RemoveReaction.
+  string reaction_id = 1;
+  // The match's CSS selector, if it matches by selector.
+  optional string match_selector = 2;
+  // The match's JS expression, if it matches by expression.
+  optional string match_js_expression = 3;
+  // Click-target selector, if the action targets a different element.
+  optional string action_selector = 4;
+  // Click-target JS expression, if the action targets a different element.
+  optional string action_js_expression = 5;
+  // Frame scope: a specific frameId, empty for the main frame, or "ALL_FRAMES".
+  string frame_id = 6;
+  // Whether the match additionally requires the element to be visible.
+  bool visible = 7;
+}
+
+message AddReactionRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+
+  // Exactly one of match_selector / match_js_expression must be set.
+  optional string match_selector = 4;
+  optional string match_js_expression = 5;
+  // Where to watch: a specific frameId, empty/omitted for the main frame, or
+  // "ALL_FRAMES" to watch every frame.
+  optional string frame_id = 6;
+  // Require the matched element to be visible before firing.
+  optional bool visible = 7;
+  // Optional click-target CSS selector, resolved in the matched element's
+  // frame. Omitted → click the matched element itself.
+  optional string action_selector = 8;
+  // Optional click-target JS expression (mutually exclusive with
+  // action_selector).
+  optional string action_js_expression = 9;
+  // "left" (default), "right", or "middle".
+  optional string button = 10;
+  // 1 = single click (default), 2 = double click.
+  optional int32 click_count = 11;
+  // Poll cadence in ms for the shared page loop. Default 300.
+  optional double interval = 12;
+}
+
+message AddReactionResponse {
+  // Id of the registered reaction (pass to RemoveReaction).
+  string reaction_id = 1;
+}
+
+message RemoveReactionRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // Id returned by AddReaction.
+  string reaction_id = 3;
+}
+
+message RemoveReactionResponse {
+  // True if a pending reaction with this id existed and was removed.
+  bool removed = 1;
+}
+
+message ListReactionsRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+}
+
+message ListReactionsResponse {
+  repeated ReactionInfo reactions = 1;
+}
+
 // Error detail for a Fill that did not complete. Present in FillResult iff
 // success is false. Fill focuses the field with the exact same smart click as
 // Click, so any pre-typing failure is a click failure: code/message mirror it
 // and the full click diagnostics are nested under click_error.
+// ElementRef is a lightweight descriptor of an element — enough for an agent to
+// identify it (and decide what to do) without another DOM round-trip. Used to
+// name the element that stole focus in a fill focus-loss failure.
+message ElementRef {
+  int32 backend_node_id = 1;
+  // Upper-case tag name, e.g. "INPUT", "BUTTON", "DIV".
+  string tag_name = 2;
+  optional string id = 3;
+  optional string name = 4;
+  optional string class_name = 5;
+  // <input> type, if the element is an <input>.
+  optional string input_type = 6;
+  // Whitespace-collapsed textContent/value snippet (max 120 chars).
+  optional string text = 7;
+  // Whether this element is itself an editable text sink (input/textarea/
+  // contenteditable).
+  bool editable = 8;
+}
+
 message FillError {
-  // Mirrored from the underlying click failure: "not_found",
-  // "occluded_no_reachable_point" or "occluded_after_evade".
+  // "not_found", "occluded_no_reachable_point", "occluded_after_evade"
+  // (mirrored from the underlying focus click; diagnostics under click_error),
+  // "focus_stolen" (another element took focus; focused_element names it) or
+  // "focus_lost" (focus left the target and nothing is focused).
   string code = 1;
   string message = 2;
-  // The underlying click-core failure that prevented focusing/typing.
+  // The underlying click-core failure that prevented focusing/typing. Present
+  // for the click-phase codes; absent for "focus_stolen"/"focus_lost".
   optional ClickError click_error = 3;
+  // For "focus_stolen"/"focus_lost": backendNodeId that held focus when fill
+  // gave up (0 if nothing was focused). Diagnostic only.
+  optional int32 focused_backend_node_id = 4;
+  // For "focus_stolen": full descriptor of the element that holds focus
+  // instead of the target, so the agent can act on it.
+  optional ElementRef focused_element = 5;
+  // The fill target's own state at the point of failure: whether it is still an
+  // editable text sink, and its current text length. Present for the focus_*
+  // codes; lets the agent tell "field vanished/readonly" from "focus stolen".
+  optional bool target_editable = 6;
+  optional int32 target_value_length = 7;
 }
 
 // FillResult mirrors the fill return: the success payload plus an optional error
@@ -601,6 +728,13 @@ message FillRequest {
   // Clear existing content (Ctrl+A, Delete) before typing. Default false,
   // so Fill appends to whatever is already in the field unless this is set.
   optional bool clear_first = 9;
+  // Budget in ms to make the field focusable+clickable before giving up
+  // (locate, scroll, settle, un-occlude); mirrors Click's timeout. Omit for
+  // the server default (5000). 0 = one-shot (no retry).
+  optional double timeout = 10;
+  // Settle window in ms before the focus click; mirrors Click's steady_time.
+  // Omit for the server default (750). 0 skips settling.
+  optional double steady_time = 11;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -830,6 +964,20 @@ message InsertTextRequest {
   string text = 4;
 }
 
+// Type dispatches `text` as a per-key stream of real keyboard events to the
+// currently focused element (untargeted, no focus pinning) — unlike InsertText,
+// which is a single IME-style commit. Focus may move between fields mid-stream
+// (e.g. OTP inputs that auto-advance on each digit). For a strict, target-bound
+// value that must stay focused, use Fill instead.
+message TypeRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  string text = 4;
+  // Clear the currently focused field first (Ctrl+A, Delete). Default false.
+  optional bool clear_first = 5;
+}
+
 // Fires a single key-down (PressKey) or key-up (ReleaseKey) event. For
 // full press cycles (down + char + up) call PressKey followed by ReleaseKey,
 // or use one of the higher-level typing helpers in the SDK.
@@ -961,4 +1109,49 @@ message SolveCaptchaResponse {
   // and require no further action from the caller. Empty on failure too.
   string result = 1;
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// Live streaming (WebRTC)
+// ──────────────────────────────────────────────────────────────────────
+
+// IceServer is one entry for an RTCPeerConnection's iceServers config: a TURN
+// (or STUN) URL plus the short-lived REST credentials to authenticate with it.
+message IceServer {
+  repeated string urls = 1;
+  optional string username = 2;
+  optional string credential = 3;
+}
+
+message GetStreamConfigRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+message GetStreamConfigResponse {
+  // TURN/STUN servers with short-lived credentials. Put these in the client's
+  // RTCPeerConnection config BEFORE creating the offer, so it can gather relay
+  // candidates.
+  repeated IceServer ice_servers = 1;
+}
+
+message StartStreamRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // The client's SDP offer. The browser sets it as the remote description and
+  // returns its answer. Relay policy, frame rate and bitrate are decided by the
+  // server — the client only offers.
+  string offer_sdp = 3;
+}
+
+message StartStreamResponse {
+  // The browser's SDP answer to set as the client's remote description.
+  string answer_sdp = 1;
+}
+
+message StopStreamRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+message StopStreamResponse {}
 

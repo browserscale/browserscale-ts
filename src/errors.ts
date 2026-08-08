@@ -1,5 +1,6 @@
 import type {
   DragResult,
+  ElementRef,
   ElementResult,
   OccluderInfo,
   SelectOptionResult,
@@ -80,15 +81,38 @@ export class ClickError extends BrowserScaleError {
 
 /**
  * FillError is thrown by {@link CloudBrowser.fill} when the field could not be
- * focused/typed. Fill focuses with the exact same smart click as
- * {@link CloudBrowser.click}, so a pre-typing failure is a click failure:
- * `code` mirrors it and the full click diagnostics live under `clickError`.
+ * focused/typed. The click-phase codes (`"not_found"`,
+ * `"occluded_no_reachable_point"`, `"occluded_after_evade"`) mirror the
+ * underlying focus click, with diagnostics under `clickError`. The focus codes
+ * are `"focus_stolen"` (another element took focus — `focusedElement` names it;
+ * fill is strictly target-bound and will not type into the thief) and
+ * `"focus_lost"` (focus left the target and nothing is focused). For untargeted
+ * stream typing that lets focus move (e.g. OTP), use {@link CloudBrowser.type}.
  */
 export class FillError extends BrowserScaleError {
-  /** Mirrored from the underlying click failure. */
+  /** Machine-stable failure code (see the class doc for the full set). */
   readonly code: string;
-  /** The underlying click-core failure that prevented focusing/typing. */
+  /**
+   * The underlying click-core failure that prevented focusing/typing. Present
+   * for the click-phase codes; undefined for `"focus_stolen"`/`"focus_lost"`.
+   */
   readonly clickError?: ClickError;
+  /**
+   * Node that held focus when fill gave up (0 if nothing was focused), for the
+   * `"focus_stolen"`/`"focus_lost"` codes.
+   */
+  readonly focusedBackendNodeId?: number;
+  /**
+   * The element that grabbed focus instead of the target (`"focus_stolen"`), so
+   * you can act on it (e.g. a consent button).
+   */
+  readonly focusedElement?: ElementRef;
+  /**
+   * The fill target's own state at the point of failure (the focus codes):
+   * whether it is still an editable text sink and its current text length.
+   */
+  readonly targetEditable?: boolean;
+  readonly targetValueLength?: number;
   /** Resolved element + coordinates at the failed action (success is false). */
   readonly result: ElementResult;
 
@@ -96,12 +120,20 @@ export class FillError extends BrowserScaleError {
     code: string;
     message: string;
     clickError?: ClickError;
+    focusedBackendNodeId?: number;
+    focusedElement?: ElementRef;
+    targetEditable?: boolean;
+    targetValueLength?: number;
     result: ElementResult;
   }) {
     super(formatMessage("fill", init.code, init.message));
     this.name = "FillError";
     this.code = init.code;
     this.clickError = init.clickError;
+    this.focusedBackendNodeId = init.focusedBackendNodeId;
+    this.focusedElement = init.focusedElement;
+    this.targetEditable = init.targetEditable;
+    this.targetValueLength = init.targetValueLength;
     this.result = init.result;
   }
 }
