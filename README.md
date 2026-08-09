@@ -60,10 +60,11 @@ Rent an isolated browser session in seconds, automate it with human-like input, 
   through. Wait for, block, mock or modify requests and responses without
   leaving the SDK; mark repeated assets as static with `setStaticPaths` to
   serve them from a server-side cache and cut proxy bandwidth on repeat runs.
-- **Agent-friendly observation** — `getObservation` returns a compact
-  text/JSON view of the visible, interactive elements across every frame, each
-  with a node handle to act on, so a model reasons over what matters instead of
-  raw HTML.
+- **Agent-friendly observation** — `getObservation` returns one line per visible
+  element across every frame, under headers carrying the URL, title and scroll
+  offset, with live form state (typed values, checkbox state, `<select>`
+  options) and a node handle to act on. A model reasons over what matters
+  instead of raw HTML, and doesn't need a JS round-trip to ask where it is.
 - **Flow-optimized TypeScript** — fully typed promise-based API, `wait` races
   multiple outcomes, JS locators target elements by page logic when CSS is
   not enough. Runs in Node.js (native gRPC) and the browser (WebSocket via
@@ -124,7 +125,7 @@ reports the element that occluded the click.
 | `browser.click(target, opts?)` | Human-like click; throws a rich `ClickError` on failure. |
 | `browser.fill(target, text, opts?)` | Per-key typing that fires real input events; `insertText` for bulk commit. |
 | `browser.evaluate(expr)` | Run JS in the page/frame and get a typed value back. |
-| `browser.getObservation(opts?)` | Compact, node-handle-tagged view of interactive elements across frames. |
+| `browser.getObservation(opts?)` | Compact, node-handle-tagged view of the visible page across frames; `opts` tunes budgets and format. |
 | `browser.solveCaptcha(opts?)` | Solve an interactive challenge in the live browser. |
 | `browser.stopBrowser()` | Release the rental. |
 

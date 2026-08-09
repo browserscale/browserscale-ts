@@ -60,7 +60,6 @@ import type {
   InterceptedResponse,
   InspectResult,
   NavigateResult,
-  ObservationResult,
   PageInfo,
   ScreenshotResult,
   ReadCanvasResult,
@@ -875,37 +874,61 @@ export class CloudBrowser {
   }
 
   /**
-   * Returns a compact, agent-friendly description of every interactable
-   * element currently visible on the page, together with a truncated view
-   * of the surrounding text.
+   * Returns a compact, frame-aware view of the visible page — the first thing
+   * to reach for on an unfamiliar page, and the cheapest way to re-read the
+   * current state afterwards.
    *
-   * Intended as input for LLM/agent loops where a full DOM dump would be
-   * too large; the server filters down to elements that are actually
-   * visible and interactable.
+   * Each frame opens with header lines carrying the URL, the title and the
+   * scroll position, then one line per visible element:
    *
-   * @param opts - optional caps: `maxElementsPerFrame`, `maxTextLength`;
-   *   omit either to use the server default
+   * ```
+   * input#email[47] type="email" name="loginId" value="a@b.com" required click "E-Mail"
+   * ```
    *
-   * @returns ObservationResult with both a human-readable `text` rendering
-   *   and a `json` payload of the structured observation
+   * It spans every frame, pierces open and closed shadow roots, enumerates
+   * `<select>` options, and reports live form state: `value=` is what is typed
+   * in right now (passwords as a length), `checked=` for boxes. The trailing
+   * quoted string is always the label or text, never the value, so an empty and
+   * a prefilled field stay distinguishable. Because the headers already carry
+   * URL, title and scroll offset, this replaces the usual handful of
+   * {@link evaluate} probes after each step.
+   *
+   * On what to do with the result: backendNodeId (the `47` above) is a handle
+   * for this session and can be passed straight to click/fill via
+   * {@link node}. It does not survive a new document, so for anything you write
+   * into a script, target with {@link css} or {@link js} instead — those calls
+   * return the backendNodeId they resolved to, which lets you confirm the
+   * durable anchor hits the element you saw.
+   *
+   * @param opts - optional format and budget overrides; see {@link GetObservationOpts}
+   *
+   * @returns the observation in the requested format, ready to hand to a model
    *
    * @throws UNKNOWN_ERROR - the observation could not be produced
    *
    * @example
-   * const obs = await browser.getObservation({ maxElementsPerFrame: 200 });
-   * console.log(obs.text);
+   * const obs = await browser.getObservation();
+   * console.log(obs);
    */
-  async getObservation(opts?: GetObservationOpts): Promise<ObservationResult> {
+  async getObservation(opts?: GetObservationOpts): Promise<string> {
     const req = create(GetObservationRequestSchema, {
       sessionId: this.sessionId,
       apiKey: this.apiKey,
     });
+    if (opts?.format !== undefined) req.format = opts.format;
     if (opts?.maxElementsPerFrame !== undefined) {
       req.maxElementsPerFrame = opts.maxElementsPerFrame;
     }
     if (opts?.maxTextLength !== undefined) req.maxTextLength = opts.maxTextLength;
+    if (opts?.maxTotalTokens !== undefined) req.maxTotalTokens = opts.maxTotalTokens;
+    if (opts?.includeBounds !== undefined) req.includeBounds = opts.includeBounds;
+    if (opts?.viewportOnly !== undefined) req.viewportOnly = opts.viewportOnly;
+    if (opts?.backendNodeId !== undefined) req.backendNodeId = opts.backendNodeId;
+    if (opts?.selector !== undefined) req.selector = opts.selector;
+    if (opts?.jsExpression !== undefined) req.jsExpression = opts.jsExpression;
+    if (opts?.frameId !== undefined) req.frameId = opts.frameId;
     const resp = await this.client.getObservation(req);
-    return { text: resp.observationText, json: resp.observationJson };
+    return resp.observation;
   }
 
   /**

@@ -110,6 +110,13 @@ export interface OccluderInfo {
    * invisible, a real click would fall through.
    */
   hittableWhileInvisible: boolean;
+  /**
+   * Computed position keyword. `"fixed"`/`"sticky"` means the blocker is pinned
+   * (by itself or an ancestor) and stays put no matter where the pointer goes —
+   * clear it by scrolling the target out from under it; ordinary overlays often
+   * collapse once the pointer leaves.
+   */
+  position: string;
 }
 
 /**
@@ -222,16 +229,6 @@ export interface SelectOptionResult {
   selectedIndex: number;
   selectedValue: string;
   selectedText: string;
-}
-
-/**
- * ObservationResult is the compact page snapshot returned by
- * {@link CloudBrowser.getObservation} — the visible, interactive elements
- * rendered as prompt-friendly text and as JSON.
- */
-export interface ObservationResult {
-  text: string;
-  json: string;
 }
 
 /**

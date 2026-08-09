@@ -269,6 +269,11 @@ message OccluderInfo {
   // swallowed even at visibility:hidden / opacity:0. When false and invisible,
   // a real click would fall through.
   optional bool hittable_while_invisible = 12;
+  // Computed position keyword. Reports "fixed"/"sticky" when the element is
+  // pinned by itself or by an ancestor — pinned blockers stay put no matter
+  // where the pointer goes and can only be cleared by scrolling the target out
+  // from under them; ordinary overlays often collapse once the pointer leaves.
+  optional string position = 13;
 }
 
 // Error detail for a Click that did not land. Present in ClickResult iff
@@ -892,17 +897,45 @@ message GetObservationRequest {
   string session_id = 1;
   string api_key = 2;
   string page_id = 3;
-  // Default 500.
+  // Safety net against runaway documents; max_total_tokens is the limit that
+  // normally binds. Default 800.
   optional int32 max_elements_per_frame = 4;
-  // Default 240.
+  // Max length of human-readable strings (labels, text, values). Default 300.
+  // Identifier-like attributes have their own shorter cap.
   optional int32 max_text_length = 5;
+  // "text" (default) for the compact line format, "json" for the structured
+  // form. Only the requested representation is built.
+  optional string format = 6;
+  // Budget across ALL frames, in estimated tokens rather than characters.
+  // Default 8000.
+  optional int32 max_total_tokens = 7;
+  // Include element bounds as bounds="x,y,w,h".
+  optional bool include_bounds = 8;
+  // Only emit elements intersecting the frame's current viewport.
+  optional bool viewport_only = 9;
+  // Scope root by backend node ID from a previous wait/getObservation.
+  // Requires frame_id. At most one of backend_node_id, selector, js_expression.
+  // Omit all three for the whole page.
+  optional int32 backend_node_id = 10;
+  // Scope root by CSS selector.
+  optional string selector = 11;
+  // Scope root by JS expression that evaluates to a DOM Element
+  // (including __wrc.shadow(...) for closed shadow roots).
+  optional string js_expression = 12;
+  // Where to look up the scope root: a specific frameId, empty/omitted for
+  // the main frame, or "ALL_FRAMES" to search every frame until found.
+  // Ignored when observing the whole page.
+  optional string frame_id = 13;
 }
 
 message GetObservationResponse {
-  // Compact plain-text observation intended for LLM context.
-  string observation_text = 1;
-  // Structured JSON with frames, elements, counts, and limits.
-  string observation_json = 2;
+  // The observation in the requested format.
+  string observation = 1;
+
+  // Field 2 was observation_json, back when text and JSON were always built
+  // together. The format parameter selects one instead.
+  reserved 2;
+  reserved "observation_json";
 }
 
 // ──────────────────────────────────────────────────────────────────────

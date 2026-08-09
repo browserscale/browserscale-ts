@@ -47,7 +47,6 @@ export type {
   ElementResult,
   DragResult,
   SelectOptionResult,
-  ObservationResult,
   ScreenshotResult,
   ReadCanvasResult,
   DOMResult,

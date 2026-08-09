@@ -146,10 +146,58 @@ export interface GetDOMOpts {
 
 /** Optional customization for {@link CloudBrowser.getObservation}. */
 export interface GetObservationOpts {
-  /** Default 200. */
+  /**
+   * `"text"` (default) for the compact line format meant to be handed to a
+   * model as-is, or `"json"` for the structured form. Only the requested
+   * representation is built, so asking for one does not cost the other.
+   */
+  format?: "text" | "json";
+  /**
+   * Cap on emitted elements per frame. Default 800 — a safety net against
+   * runaway documents; `maxTotalTokens` is the limit that normally binds.
+   */
   maxElementsPerFrame?: number;
-  /** Default 200. */
+  /**
+   * Cap on human-readable strings (labels, text, values) in characters.
+   * Default 300. Identifier-like attributes (type, name, role) have their own
+   * fixed, shorter cap and are unaffected.
+   */
   maxTextLength?: number;
+  /**
+   * Budget across ALL frames, in estimated tokens rather than characters —
+   * the same character count is worth roughly four times as many tokens in
+   * CJK text as in ASCII. Default 8000. Frames are visited in tree order and
+   * each gets whatever is left.
+   */
+  maxTotalTokens?: number;
+  /**
+   * Include element bounds as `bounds="x,y,w,h"`. Off by default; bounds cost
+   * about as much as the rest of a row and are rarely needed, since elements
+   * are addressed by backendNodeId.
+   */
+  includeBounds?: boolean;
+  /** Only emit elements intersecting the frame's current viewport. */
+  viewportOnly?: boolean;
+  /**
+   * Subtree scope — set exactly one of `backendNodeId`, `selector` or
+   * `jsExpression` to observe only that element's subtree (follow-up looks at
+   * a form then cost the form, not the ads around it). Omit all three for the
+   * whole page. Child iframes reached inside the scope are still visited.
+   */
+  backendNodeId?: number;
+  /** Scope root by CSS selector. */
+  selector?: string;
+  /**
+   * Scope root by JS expression that evaluates to a DOM Element (including
+   * `__wrc.shadow(...)` for closed shadow roots).
+   */
+  jsExpression?: string;
+  /**
+   * Where to look up the scope root: a specific `frameId`, omit for the main
+   * frame, or {@link AllFrames} to search every frame until found. Ignored when
+   * observing the whole page.
+   */
+  frameId?: string;
 }
 
 /** Optional customization for {@link CloudBrowser.screenshot}. */

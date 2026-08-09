@@ -152,6 +152,7 @@ function occluderFromProto(o?: ProtoOccluderInfo): OccluderInfo | undefined {
     opacity: o.opacity ?? 0,
     zIndex: o.zIndex ?? "",
     hittableWhileInvisible: o.hittableWhileInvisible ?? false,
+    position: o.position ?? "",
   };
 }
 
