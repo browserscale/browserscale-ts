@@ -23,7 +23,7 @@ Rent an isolated browser session in seconds, automate it with human-like input, 
   pages, frames, cookies, storage and network state. No local binary.
 - **Parallel isolated contexts** — each task gets its own session, fingerprint
   and lifecycle; large queues never share browser state. Sessions are browser
-  contexts, not VMs or processes, so they spin up in under 50 ms and fan out to
+  contexts, not VMs or processes, so they spin up in under 250 ms and fan out to
   thousands in parallel.
 - **Fingerprint & proxy handling** — pinnable server-side fingerprints,
   native Chrome control without CDP/Playwright/Puppeteer leaks, bring your own
@@ -130,8 +130,9 @@ reports the element that occluded the click.
 | `browser.stopBrowser()` | Release the rental. |
 
 Locators: `css(...)`, `js(...)` (target by page logic when CSS can't). Plus
-cookies, storage, network interception, mouse/scroll/drag/select/key events, and
-canvas reads — see the full reference below.
+cookies, storage, auth/DBSC (`getAuthSession`/`setAuthSession`), network
+interception, mouse/scroll/drag/select/key events, and canvas reads — see the
+full reference below.
 
 ## Documentation
 

@@ -87,6 +87,9 @@ export type { CookieParam } from "./cookies.ts";
 // Storage (localStorage)
 export type { StorageItem, StorageOriginEntry } from "./storage.ts";
 
+// Auth / DBSC (portable signed-in persona)
+export type { AuthSession, DbscSession } from "./auth-session.ts";
+
 // Rent / stop ──────────────────────────────────────────────────────────
 
 let apiEndpoint = "https://api.browserscale.cloud";

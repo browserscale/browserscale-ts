@@ -33,6 +33,8 @@ import {
   GetStorageRequestSchema,
   SetStorageRequestSchema,
   ClearStorageRequestSchema,
+  GetAuthSessionRequestSchema,
+  SetAuthSessionRequestSchema,
   InspectAtPositionRequestSchema,
   HighlightNodeRequestSchema,
   InsertTextRequestSchema,
@@ -84,7 +86,10 @@ import type {
 import type { HeaderModification, RequestPattern } from "./network.ts";
 import type { CookieParam } from "./cookies.ts";
 import type { StorageOriginEntry } from "./storage.ts";
+import type { AuthSession } from "./auth-session.ts";
 import {
+  authSessionFromProto,
+  authSessionToProto,
   cookieParamFromProto,
   cookieParamsToProto,
   elementFields,
@@ -1385,6 +1390,61 @@ export class CloudBrowser {
     });
     if (origin) req.origin = origin;
     await this.client.clearStorage(req);
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Auth / DBSC (portable signed-in persona)
+  // ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Exports the signed-in primary account and DBSC sessions of this
+   * browser context.
+   *
+   * State is read in the browser process, so no page needs to be open.
+   * Returns undefined when the context has neither a signed-in account
+   * nor DBSC sessions.
+   *
+   * @returns AuthSession, or undefined when there is nothing to export
+   *
+   * @throws UNKNOWN_ERROR - the auth session could not be read
+   *
+   * @example
+   * const auth = await browser.getAuthSession();
+   * if (auth) await fs.writeFile("auth.json", JSON.stringify(auth));
+   */
+  async getAuthSession(): Promise<AuthSession | undefined> {
+    const resp = await this.client.getAuthSession(
+      create(GetAuthSessionRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+      }),
+    );
+    return resp.session ? authSessionFromProto(resp.session) : undefined;
+  }
+
+  /**
+   * Imports an auth session so the context comes up signed in (and syncing
+   * if syncConsent) with its DBSC sessions restored.
+   *
+   * Call it before navigating. Pair with setCookies() / setStorage() to
+   * restore a full persona.
+   *
+   * @param session - session as returned by getAuthSession()
+   *
+   * @throws UNKNOWN_ERROR - the auth session could not be written
+   *
+   * @example
+   * await browser.setAuthSession(saved);
+   * await browser.navigate("https://mail.google.com");
+   */
+  async setAuthSession(session: AuthSession): Promise<void> {
+    await this.client.setAuthSession(
+      create(SetAuthSessionRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+        session: authSessionToProto(session),
+      }),
+    );
   }
 
   // ──────────────────────────────────────────────────────────────────

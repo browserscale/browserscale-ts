@@ -23,12 +23,15 @@ import {
   type HeaderModification as ProtoHeaderModification,
   type CookieParam as ProtoCookieParam,
   type StorageOriginEntry as ProtoStorageOriginEntry,
+  type AuthSession as ProtoAuthSession,
   HeaderModificationSchema,
   CookiePartitionKeySchema,
   CookieParamSchema,
   HeaderSchema,
   StorageItemSchema,
   StorageOriginEntrySchema,
+  AuthSessionSchema,
+  DbscSessionSchema,
 } from "../gen/wrc_pb.ts";
 import type {
   DragResult,
@@ -56,6 +59,7 @@ import {
 } from "../errors.ts";
 import type { CookieParam } from "../cookies.ts";
 import type { StorageOriginEntry } from "../storage.ts";
+import type { AuthSession } from "../auth-session.ts";
 import type { HeaderModification, RequestPattern } from "../network.ts";
 import { type Locator, pickFrame } from "../locator.ts";
 
@@ -460,6 +464,41 @@ export function storageEntriesToProto(
     });
     return msg;
   });
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Auth / DBSC
+// ──────────────────────────────────────────────────────────────────────
+
+export function authSessionFromProto(s: ProtoAuthSession): AuthSession {
+  const out: AuthSession = {};
+  if (s.gaiaId !== undefined) out.gaiaId = s.gaiaId;
+  if (s.email !== undefined) out.email = s.email;
+  if (s.refreshToken !== undefined) out.refreshToken = s.refreshToken;
+  if (s.wrappedBindingKey !== undefined) out.wrappedBindingKey = s.wrappedBindingKey;
+  if (s.signinScopedDeviceId !== undefined) out.signinScopedDeviceId = s.signinScopedDeviceId;
+  if (s.syncConsent !== undefined) out.syncConsent = s.syncConsent;
+  if (s.dbscSessions.length > 0) {
+    out.dbscSessions = s.dbscSessions.map(d => ({ site: d.site, session: d.session }));
+  }
+  return out;
+}
+
+export function authSessionToProto(s: AuthSession): ProtoAuthSession {
+  const msg = create(AuthSessionSchema);
+  if (s.gaiaId !== undefined) msg.gaiaId = s.gaiaId;
+  if (s.email !== undefined) msg.email = s.email;
+  if (s.refreshToken !== undefined) msg.refreshToken = s.refreshToken;
+  if (s.wrappedBindingKey !== undefined) msg.wrappedBindingKey = s.wrappedBindingKey;
+  if (s.signinScopedDeviceId !== undefined) msg.signinScopedDeviceId = s.signinScopedDeviceId;
+  if (s.syncConsent !== undefined) msg.syncConsent = s.syncConsent;
+  msg.dbscSessions = (s.dbscSessions ?? []).map(d => {
+    const item = create(DbscSessionSchema);
+    item.site = d.site;
+    item.session = d.session;
+    return item;
+  });
+  return msg;
 }
 
 // ──────────────────────────────────────────────────────────────────────

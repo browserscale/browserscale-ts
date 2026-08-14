@@ -66,6 +66,10 @@ service Browser {
   rpc SetStorage(SetStorageRequest) returns (google.protobuf.Empty);
   rpc ClearStorage(ClearStorageRequest) returns (google.protobuf.Empty);
 
+  // Auth / DBSC (portable signed-in persona)
+  rpc GetAuthSession(GetAuthSessionRequest) returns (GetAuthSessionResponse);
+  rpc SetAuthSession(SetAuthSessionRequest) returns (google.protobuf.Empty);
+
   // DOM / observation
   rpc GetDOM(GetDOMRequest) returns (GetDOMResponse);
   rpc GetDOMHash(GetDOMHashRequest) returns (GetDOMHashResponse);
@@ -873,6 +877,57 @@ message ClearStorageRequest {
   string api_key = 2;
   // If set, only this origin's storage is deleted; otherwise all origins.
   optional string origin = 3;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Auth / DBSC (portable signed-in persona)
+// ──────────────────────────────────────────────────────────────────────
+
+// One Device Bound Session Credentials entry (WRC.DbscSession).
+message DbscSession {
+  // Serialized net::SchemefulSite (eTLD+1 site key), e.g. "https://google.com".
+  string site = 1;
+  // Base64 of the serialized net.device_bound_sessions.proto.Session
+  // (includes the wrapped binding key; portable under WRC's software
+  // UnexportableKeyProvider).
+  string session = 2;
+}
+
+// Portable snapshot of a context's signed-in Google account and/or DBSC
+// sessions (WRC.AuthSession). All fields optional so partial state round-trips.
+message AuthSession {
+  // Gaia obfuscated account id.
+  optional string gaia_id = 1;
+  // Account email.
+  optional string email = 2;
+  // OAuth refresh token (persistent).
+  optional string refresh_token = 3;
+  // Base64 of the wrapped device-binding key for the refresh token.
+  // Empty/absent = unbound token.
+  optional string wrapped_binding_key = 4;
+  // Signin-scoped device id; must travel with the token.
+  optional string signin_scoped_device_id = 5;
+  // True if the account should be restored at Sync consent.
+  optional bool sync_consent = 6;
+  // Device Bound Session Credentials for this context (all bound sites).
+  repeated DbscSession dbsc_sessions = 7;
+}
+
+message GetAuthSessionRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+message GetAuthSessionResponse {
+  // Present only if the context has exportable auth/DBSC state.
+  optional AuthSession session = 1;
+}
+
+message SetAuthSessionRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // Session to import (as returned by GetAuthSession).
+  AuthSession session = 3;
 }
 
 // ──────────────────────────────────────────────────────────────────────
