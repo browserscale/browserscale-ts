@@ -20,6 +20,7 @@ import {
   type Header as ProtoHeader,
   type InterceptedRequest as ProtoInterceptedRequest,
   type InterceptedResponse as ProtoInterceptedResponse,
+  type NetworkExchange as ProtoNetworkExchange,
   type HeaderModification as ProtoHeaderModification,
   type CookieParam as ProtoCookieParam,
   type StorageOriginEntry as ProtoStorageOriginEntry,
@@ -41,6 +42,7 @@ import type {
   Header,
   InterceptedRequest,
   InterceptedResponse,
+  NetworkExchange,
   OccluderInfo,
   PageInfo,
   Rect,
@@ -371,6 +373,51 @@ export function interceptedRequestFromProto(
     headers: r.headers.map(headerFromProto),
     body: r.body,
     resourceType: r.resourceType,
+  };
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Network capture
+// ──────────────────────────────────────────────────────────────────────
+
+/**
+ * The int64/uint64 fields arrive as bigint. Byte counts stay far below
+ * Number.MAX_SAFE_INTEGER, so they are narrowed to number to keep the SDK
+ * surface free of bigint.
+ */
+export function networkExchangeFromProto(e: ProtoNetworkExchange): NetworkExchange {
+  return {
+    requestId: e.requestId,
+    chainId: e.chainId,
+    redirectIndex: e.redirectIndex,
+    frameId: e.frameId,
+    isOopif: e.isOopif,
+    resourceType: e.resourceType,
+
+    method: e.method,
+    url: e.url,
+    initiatorUrl: e.initiatorUrl,
+    requestHeaders: e.requestHeaders.map(headerFromProto),
+    requestHeadersAreWire: e.requestHeadersAreWire,
+    requestBody: e.requestBody,
+    requestBodyTruncated: e.requestBodyTruncated,
+
+    hasResponse: e.hasResponse,
+    statusCode: e.statusCode,
+    statusText: e.statusText,
+    mimeType: e.mimeType,
+    protocol: e.protocol,
+    remoteAddress: e.remoteAddress,
+    servedFrom: e.servedFrom,
+    responseHeaders: e.responseHeaders.map(headerFromProto),
+    responseHeadersAreWire: e.responseHeadersAreWire,
+    responseBody: e.responseBody,
+    responseBodyTruncated: e.responseBodyTruncated,
+    responseBodyCaptured: e.responseBodyCaptured,
+
+    encodedDataLength: Number(e.encodedDataLength),
+
+    error: e.error,
   };
 }
 

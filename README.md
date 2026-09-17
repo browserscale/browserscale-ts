@@ -60,6 +60,19 @@ Rent an isolated browser session in seconds, automate it with human-like input, 
   through. Wait for, block, mock or modify requests and responses without
   leaving the SDK; mark repeated assets as static with `setStaticPaths` to
   serve them from a server-side cache and cut proxy bandwidth on repeat runs.
+- **Streaming network capture** — `captureNetwork` reports every request the
+  session completes as it happens, and "every request" is literal: capture sits
+  in the browser process rather than in a page, so cross-process iframes,
+  workers and service workers are included, the headers are the ones actually
+  put on the wire, and each hop of a redirect chain arrives as its own exchange.
+  Requests are never paused, so the page loads at full speed.
+- **Live DOM mirror** — `mirrorDom` holds the page as one incrementally updated
+  tree: the browser sends the top once and from then on only what changed in the
+  part you expanded, so a page churning inside a collapsed subtree costs one
+  number per batch instead of a re-serialized document. An `<iframe>` is an
+  ordinary element whose one child is the document it hosts, however deeply
+  nested or cross-origin, and `getDomRevision` is the O(1) change detector to
+  poll when you are not consuming events.
 - **Agent-friendly observation** — `getObservation` returns one line per visible
   element across every frame, under headers carrying the URL, title and scroll
   offset, with live form state (typed values, checkbox state, `<select>`
@@ -126,6 +139,8 @@ reports the element that occluded the click.
 | `browser.fill(target, text, opts?)` | Per-key typing that fires real input events; `insertText` for bulk commit. |
 | `browser.evaluate(expr)` | Run JS in the page/frame and get a typed value back. |
 | `browser.getObservation(opts?)` | Compact, node-handle-tagged view of the visible page across frames; `opts` tunes budgets and format. |
+| `browser.captureNetwork(opts, onExchange)` | Stream every request the session completes, optionally with response bodies. |
+| `browser.mirrorDom(opts, onChange, onResync?)` | Live, incrementally updated copy of the page's DOM across every frame. |
 | `browser.solveCaptcha(opts?)` | Solve an interactive challenge in the live browser. |
 | `browser.stopBrowser()` | Release the rental. |
 

@@ -38,6 +38,11 @@ export type {
   Header,
   InterceptedRequest,
   InterceptedResponse,
+  NetworkExchange,
+  NetworkResourceType,
+  NetworkServedFrom,
+  NetworkBodies,
+  NetworkCaptureOptions,
   WaitResult,
   WaitConditionStatus,
   OccluderInfo,
@@ -53,6 +58,7 @@ export type {
   InspectResult,
   RentResponse,
   IceServer,
+  StreamAnswer,
   ReactionInfo,
 } from "./types.ts";
 
@@ -80,6 +86,18 @@ export {
   type HeaderModification,
   type HeaderModificationAction,
 } from "./network.ts";
+
+// Network capture (traffic log)
+export { NetworkCapture, type NetworkExchangeHandler } from "./network-capture.ts";
+export {
+  DomMirror,
+  type DomNode,
+  type DomSnapshot,
+  type DomMirrorOptions,
+  type DomChangeHandler,
+  type DomResyncHandler,
+  type DomResyncReason,
+} from "./dom-mirror.ts";
 
 // Cookies
 export type { CookieParam } from "./cookies.ts";

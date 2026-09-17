@@ -62,6 +62,144 @@ export interface InterceptedResponse {
 }
 
 /**
+ * NetworkResourceType is the kind of load an exchange belongs to.
+ *
+ * Typed as a union with a `string` fallback so an exchange from a newer browser
+ * still carries its value through instead of failing to type. Note that
+ * `fetch()`, XMLHttpRequest and EventSource all report `"fetch"`: they are
+ * indistinguishable at the capture point.
+ */
+export type NetworkResourceType =
+  | "document"
+  | "subframe"
+  | "script"
+  | "stylesheet"
+  | "image"
+  | "font"
+  | "media"
+  | "fetch"
+  | "worker"
+  | "manifest"
+  | "object"
+  | "csp-report"
+  | "other"
+  | (string & {});
+
+/**
+ * NetworkServedFrom says where an exchange's response came from.
+ * `"wrcStaticCache"` is browserscale's own static cache — see
+ * {@link CloudBrowser.setStaticPaths}.
+ */
+export type NetworkServedFrom =
+  | "network"
+  | "cache"
+  | "serviceWorker"
+  | "wrcStaticCache"
+  | "wrcSynthetic"
+  | (string & {});
+
+/**
+ * NetworkExchange is one request together with the response it received, as
+ * reported by {@link CloudBrowser.captureNetwork}.
+ *
+ * A redirect chain arrives as one exchange per hop: the hops share `chainId` and
+ * count up `redirectIndex`, so a 302 and the request it points at are two
+ * exchanges, each with its own headers and status.
+ */
+export interface NetworkExchange {
+  /** Unique per hop. */
+  requestId: string;
+  /** Shared by every hop of one redirect chain. */
+  chainId: string;
+  /** 0 for the original request, incremented once per redirect followed. */
+  redirectIndex: number;
+  /** The frame that issued the request; empty for worker traffic. */
+  frameId: string;
+  /**
+   * Whether that frame runs in its own process. Capture happens in the browser
+   * process, so cross-process iframes are included.
+   */
+  isOopif: boolean;
+  resourceType: NetworkResourceType;
+
+  method: string;
+  url: string;
+  /** The origin that started the request; empty when the browser itself did. */
+  initiatorUrl: string;
+  requestHeaders: Header[];
+  /**
+   * Whether requestHeaders are the bytes actually sent — Cookie, User-Agent and
+   * Sec-* included — rather than what the page asked for before the network
+   * stack filled in the rest.
+   */
+  requestHeadersAreWire: boolean;
+  /**
+   * Inline body only. File and streamed uploads set requestBodyTruncated
+   * instead of appearing here.
+   */
+  requestBody: Uint8Array;
+  requestBodyTruncated: boolean;
+
+  /** False when the request failed before any response arrived; see error. */
+  hasResponse: boolean;
+  statusCode: number;
+  statusText: string;
+  mimeType: string;
+  /** Negotiated ALPN protocol, e.g. "h2" or "http/1.1". */
+  protocol: string;
+  remoteAddress: string;
+  servedFrom: NetworkServedFrom;
+  responseHeaders: Header[];
+  responseHeadersAreWire: boolean;
+  /**
+   * Populated only when body capture was requested for this URL and applied;
+   * check responseBodyCaptured to tell an empty body from an uncaptured one.
+   * Binary content does not survive the browser boundary intact — see
+   * {@link NetworkCaptureOptions.bodies}.
+   */
+  responseBody: Uint8Array;
+  responseBodyTruncated: boolean;
+  responseBodyCaptured: boolean;
+
+  /** Bytes on the wire, not body size; 0 for a response served from cache. */
+  encodedDataLength: number;
+
+  /** Net error name (e.g. "net::ERR_ABORTED"), empty on success. */
+  error: string;
+}
+
+/** How much of a response body a network capture keeps. */
+export type NetworkBodies = "none" | "text" | "all";
+
+/**
+ * Configures {@link CloudBrowser.captureNetwork}.
+ *
+ * There is deliberately no byte-cap option: buffer sizes bound memory on a
+ * machine shared with other sessions, so the server owns them.
+ */
+export interface NetworkCaptureOptions {
+  /**
+   * URL wildcards to capture; omit to capture every request the session makes.
+   * Prefix a pattern with "!" to exclude it, which is the short way to say
+   * "everything except this".
+   */
+  patterns?: string[];
+  /**
+   * Response-body capture. `"text"` keeps bodies whose MIME type is textual,
+   * `"all"` keeps every body — but binary payloads (images, fonts, video) do
+   * not cross the browser boundary intact, so prefer `"text"` unless you know
+   * the bodies are textual. Defaults to `"none"`, headers and status only.
+   */
+  bodies?: NetworkBodies;
+  /**
+   * Narrows body capture to a subset of the captured requests; omit to apply
+   * bodies to all of them. Use it to log every request but only keep the
+   * payloads you care about.
+   */
+  bodyPatterns?: string[];
+}
+
+/**
  * WaitResult is the outcome of a {@link CloudBrowser.wait} /
  * {@link CloudBrowser.waitForAny} call: which condition matched (index, in
  * argument order) and where the matched element lives.
@@ -304,6 +442,24 @@ export interface IceServer {
   username: string;
   /** Short-lived TURN REST credential (empty for plain STUN). */
   credential: string;
+}
+
+/**
+ * StreamAnswer is what {@link CloudBrowser.startStream} replies with.
+ */
+export interface StreamAnswer {
+  /** SDP answer to apply as your peer's remote description. */
+  answerSdp: string;
+  /**
+   * The page's viewport in CSS pixels — the coordinate space its input
+   * expects. The video may be displayed at any size, so map your pointer
+   * positions into this space before sending them. It comes back with the
+   * answer rather than from a separate {@link CloudBrowser.getPages} so it
+   * cannot race the stream or describe a different page, and the browser
+   * pushes `{"type":"viewport","width":W,"height":H}` on the reliable "input"
+   * data channel whenever it changes. Null against an older engine.
+   */
+  viewport: { width: number; height: number } | null;
 }
 
 /**

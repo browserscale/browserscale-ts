@@ -56,6 +56,14 @@ service Browser {
   rpc WaitForAnyResponse(WaitForAnyResponseRequest) returns (WaitForAnyResponseResponse);
   rpc ModifyRequest(ModifyRequestRequest) returns (ModifyRequestResponse);
 
+  // Network capture — every matching request in the session, reported as it
+  // completes. Start/Stop are session state; the stream is a separate
+  // subscription, so a capture survives a reader reconnect and two readers
+  // can watch one capture.
+  rpc StartNetworkCapture(StartNetworkCaptureRequest) returns (google.protobuf.Empty);
+  rpc StopNetworkCapture(StopNetworkCaptureRequest) returns (StopNetworkCaptureResponse);
+  rpc StreamNetworkExchanges(StreamNetworkExchangesRequest) returns (stream NetworkExchangeEvent);
+
   // Cookies
   rpc GetCookies(GetCookiesRequest) returns (GetCookiesResponse);
   rpc SetCookies(SetCookiesRequest) returns (google.protobuf.Empty);
@@ -76,6 +84,31 @@ service Browser {
   rpc GetObservation(GetObservationRequest) returns (GetObservationResponse);
   rpc InspectAtPosition(InspectAtPositionRequest) returns (InspectAtPositionResponse);
   rpc HighlightNode(HighlightNodeRequest) returns (google.protobuf.Empty);
+
+  // DOM mirror — an incremental view of the page's DOM, as ONE tree.
+  // StartDomMirror returns the top of the main document and from then on the
+  // browser reports changes to the part the client has actually expanded; the
+  // reads grow and shrink that part. Together they replace polling GetDOMHash
+  // and re-fetching GetDOM.
+  //
+  // An <iframe> is an ordinary element whose one child is the document it
+  // hosts, fetched by expanding it — which is also what starts mirroring that
+  // frame, so frames cost nothing until someone opens one. There is no frame
+  // lifecycle to subscribe to. RevealDomNode reaches into a frame nobody
+  // opened and starts the ones on the way, which is what makes a hit test
+  // usable against a lazily loaded tree.
+  //
+  // Like network capture, the stream is a separate subscription so a mirror
+  // survives a reader reconnect. Unlike it, the stream carries both updates
+  // and resyncs on ONE channel: a resync means "everything you hold is void",
+  // which is only interpretable in order against the batches around it.
+  rpc StartDomMirror(StartDomMirrorRequest) returns (StartDomMirrorResponse);
+  rpc StopDomMirror(StopDomMirrorRequest) returns (google.protobuf.Empty);
+  rpc GetDomChildren(GetDomChildrenRequest) returns (GetDomChildrenResponse);
+  rpc ReleaseDomSubtree(ReleaseDomSubtreeRequest) returns (google.protobuf.Empty);
+  rpc RevealDomNode(RevealDomNodeRequest) returns (RevealDomNodeResponse);
+  rpc GetDomRevision(GetDomRevisionRequest) returns (GetDomRevisionResponse);
+  rpc StreamDomEvents(StreamDomEventsRequest) returns (stream DomEvent);
 
   // Screenshot / capture
   rpc Screenshot(ScreenshotRequest) returns (ScreenshotResponse);
@@ -808,6 +841,107 @@ message ModifyRequestResponse {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// Network capture
+// ──────────────────────────────────────────────────────────────────────
+
+message StartNetworkCaptureRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // URL wildcards to capture; empty captures everything in the session.
+  // Prefix an entry with "!" to exclude it.
+  repeated string patterns = 3;
+  // Response body capture: "none" (default), "text" or "all".
+  string bodies = 4;
+  // Narrows body capture further; empty applies `bodies` to every captured
+  // exchange.
+  repeated string body_patterns = 5;
+
+  // The per-body and per-session byte caps the browser command also accepts
+  // are deliberately not on the wire: they bound memory on a host shared by
+  // every session on the machine, so one caller must not be able to size
+  // another caller's buffers. Reserved in case that ever changes.
+  reserved 6, 7;
+}
+
+message StopNetworkCaptureRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+message StopNetworkCaptureResponse {
+  // False if no capture was running for this session.
+  bool stopped = 1;
+}
+
+message StreamNetworkExchangesRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+message NetworkExchangeEvent {
+  NetworkExchange exchange = 1;
+  // Cumulative exchanges dropped for this subscriber because it read slower
+  // than the page produced them. Non-zero means the log has holes.
+  uint64 dropped = 2;
+}
+
+// One request together with the response it received.
+//
+// A redirect is not a special case: every hop is reported as its own exchange,
+// sharing chain_id with its siblings and counting up redirect_index.
+message NetworkExchange {
+  // Unique per hop.
+  string request_id = 1;
+  // Shared by every hop of one redirect chain.
+  string chain_id = 2;
+  // 0 for the original request, incremented once per redirect followed.
+  int32 redirect_index = 3;
+  // DevTools frame token of the originating frame; empty for workers.
+  string frame_id = 4;
+  // Whether that frame runs in its own process.
+  bool is_oopif = 5;
+  // "document" | "subframe" | "script" | "stylesheet" | "image" | "font" |
+  // "media" | "fetch" | "worker" | "manifest" | "object" | "csp-report" |
+  // "other". fetch(), XMLHttpRequest and EventSource all report "fetch" —
+  // they are indistinguishable in the browser process.
+  string resource_type = 6;
+  string method = 7;
+  string url = 8;
+  // Origin that initiated the request; empty if browser-initiated.
+  string initiator_url = 9;
+  repeated Header request_headers = 10;
+  // True when request_headers are the bytes actually put on the wire —
+  // Cookie, User-Agent, Sec-* and encoding included. False means they are what
+  // the renderer asked for, before the network service filled in the rest.
+  bool request_headers_are_wire = 11;
+  // Inline request body, capped by the browser. File and streamed uploads are
+  // not included; request_body_truncated is set when anything was left out.
+  bytes request_body = 12;
+  bool request_body_truncated = 13;
+  // False when the request failed before any response arrived.
+  bool has_response = 14;
+  int32 status_code = 15;
+  string status_text = 16;
+  string mime_type = 17;
+  // Negotiated ALPN protocol, e.g. "h2" or "http/1.1".
+  string protocol = 18;
+  string remote_address = 19;
+  // "network" | "cache" | "serviceWorker" | "wrcStaticCache" | "wrcSynthetic"
+  string served_from = 20;
+  repeated Header response_headers = 21;
+  bool response_headers_are_wire = 22;
+  // Populated only when body capture was requested and applied. Bodies cross
+  // the browser boundary as text, so binary content (bodies="all" on an image)
+  // does not arrive intact.
+  bytes response_body = 23;
+  bool response_body_truncated = 24;
+  bool response_body_captured = 25;
+  int64 encoded_data_length = 26;
+  // Net error name (e.g. "net::ERR_ABORTED"); empty on success.
+  string error = 27;
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // Cookies
 // ──────────────────────────────────────────────────────────────────────
 
@@ -1010,6 +1144,160 @@ message GetDOMHashResponse {
   string hash = 1;
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// DOM mirror
+// ──────────────────────────────────────────────────────────────────────
+
+message StartDomMirrorRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // Levels to serialize up front. Default 2 (#document -> <html> ->
+  // <head>/<body>) — enough to draw a collapsed tree. -1 walks everything and
+  // defeats the point of the mirror.
+  optional int32 depth = 4;
+  // Descend into author shadow roots. Fixed for the life of the mirror.
+  optional bool pierce = 5;
+
+  reserved 3;  // was frame_id, before the mirror became page-wide
+}
+
+message StartDomMirrorResponse {
+  // The MAIN frame's document, CDP DOM.Node-shaped JSON, the same format
+  // GetDOM returns.
+  //
+  // An <iframe> in it reports child_node_count 1 without carrying that child:
+  // the document it hosts is fetched with GetDomChildren like any other child
+  // list, and asking is also what starts mirroring that frame.
+  string root = 1;
+  // The page's main frame.
+  string frame_id = 2;
+  // The page sequence this snapshot is the baseline for. Every DomUpdate after
+  // it carries a higher one.
+  uint64 seq = 3;
+
+  reserved 4;  // was frames[]; a frame's document is now a child of its owner
+}
+
+message StopDomMirrorRequest {
+  string session_id = 1;
+  string api_key = 2;
+
+  reserved 3;  // was frame_id; the mirror is page-wide
+}
+
+message GetDomChildrenRequest {
+  string session_id = 1;
+  string api_key = 2;
+  int32 backend_node_id = 3;
+  optional string frame_id = 4;
+  // Levels below the node. Default 1.
+  optional int32 depth = 5;
+}
+
+message GetDomChildrenResponse {
+  // JSON array of DOM.Node. Empty for an id this mirror never handed out,
+  // which is also what a stale id from before a resync looks like.
+  //
+  // On an <iframe>/<frame>/<object> the one child is the document it hosts,
+  // and this call is what starts mirroring that frame.
+  string children = 1;
+  // Page sequence this payload is valid as of.
+  uint64 seq = 2;
+}
+
+message ReleaseDomSubtreeRequest {
+  string session_id = 1;
+  string api_key = 2;
+  int32 backend_node_id = 3;
+  optional string frame_id = 4;
+}
+
+message RevealDomNodeRequest {
+  string session_id = 1;
+  string api_key = 2;
+  int32 backend_node_id = 3;
+  optional string frame_id = 4;
+}
+
+message RevealDomNodeResponse {
+  // JSON array of DOM.Node, the MAIN document first, each carrying one level
+  // of children, crossing into frames at the document nodes along it. A
+  // document's frame_id is the id space its own backend_node_id and everything
+  // after it counts in. Empty if the node is not on the page.
+  string path = 1;
+  // Page sequence this payload is valid as of.
+  uint64 seq = 2;
+}
+
+message GetDomRevisionRequest {
+  string session_id = 1;
+  string api_key = 2;
+  optional string frame_id = 3;
+}
+
+message GetDomRevisionResponse {
+  // Monotonic counter, meaningful only within the current document.
+  uint64 revision = 1;
+}
+
+message StreamDomEventsRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+// One batch of edits to the revealed part of the page's DOM.
+message DomUpdate {
+  // The id space these entries' node ids live in. Node ids restart per frame,
+  // so this is half of every address in the batch.
+  string frame_id = 1;
+  // Page sequence AFTER applying this batch. One clock for the whole page: an
+  // edit in an OOPIF and one in the main document are ordered against each
+  // other because both passed through the browser in the order it saw them.
+  uint64 seq = 2;
+  // JSON array of entries, ordered, to be applied in order. See the domUpdate
+  // event in WRC.pdl for the entry shapes.
+  //
+  // A frame's document arriving or being replaced is an edit like any other: a
+  // childNodeInserted or childNodeRemoved on the <iframe> that hosts it, both
+  // in the same batch when it is a replacement.
+  string edits = 3;
+}
+
+// The client's copy of the page is void and must be rebuilt by calling
+// StartDomMirror again.
+//
+// Page-wide, because only the MAIN frame can void everything. A child frame
+// losing its document is a childNodeRemoved plus a childNodeInserted on its
+// owner, which costs that subtree rather than the page. Worth the distinction
+// on any page carrying ad frames, where the page-wide version would otherwise
+// fire continuously.
+message DomResync {
+  // "documentReplaced", "overflow", "rendererGone" from the browser, or
+  // "slowReader" when this relay could not hold the backlog.
+  string reason = 2;
+
+  reserved 1;  // was frame_id; a resync is page-wide
+}
+
+// Updates and resyncs share one stream because they are only meaningful
+// relative to each other. On two streams a client could apply a batch that the
+// resync it has not read yet already invalidated, and no amount of sequence
+// bookkeeping recovers that ordering after the fact.
+//
+// There is deliberately no dropped-message counter, which the network exchange
+// stream does have. A dropped exchange leaves a log with a hole in it; a
+// dropped edit leaves a TREE THAT IS WRONG, and a client cannot tell the
+// difference by looking at it. So a backlog this relay cannot hold is
+// converted into a resync instead of being counted.
+message DomEvent {
+  oneof event {
+    DomUpdate update = 1;
+    DomResync resync = 2;
+  }
+
+  reserved 3, 4;  // were frame_attached / frame_detached
+}
+
 message InspectAtPositionRequest {
   string session_id = 1;
   string api_key = 2;
@@ -1131,11 +1419,10 @@ message ScreenshotResponse {
   int32 height = 3;
 }
 
-// ReadCanvas reads the pixels of a single <canvas> element directly in the
-// renderer, bypassing the origin-clean (tainted) security check and without
-// executing page JavaScript — so cross-origin/tainted canvases (common in
-// captchas) can be read. The element is addressed like any other action
-// target: by selector, js_expression, or backend_node_id.
+// ReadCanvas reads the pixels of a <canvas> directly in the renderer, bypassing
+// the origin-clean (tainted) security check and without executing page JS.
+// Cross-origin/tainted canvases read fine. Targeted like click: by
+// backendNodeId (preferred), CSS selector, or JS expression.
 message ReadCanvasRequest {
   string session_id = 1;
   string api_key = 2;
@@ -1144,16 +1431,15 @@ message ReadCanvasRequest {
   optional int32 backend_node_id = 4;
   optional string selector = 5;
   optional string js_expression = 6;
-  // Specific frameId, empty/omitted for main frame, or "ALL_FRAMES".
   optional string frame_id = 7;
 
-  // Output encoding: "png" (default), "jpeg", "webp", or "rgba" for the raw
-  // unpremultiplied RGBA pixel buffer.
+  // Output format: "png" (default), "jpeg", "webp", or "rgba" for the raw
+  // unencoded RGBA pixel buffer.
   optional string format = 8;
   // Encode quality 0-100 for "jpeg"/"webp" (ignored otherwise). Default 90.
   optional int32 quality = 9;
-  // Optional sub-rectangle in canvas pixels (mirrors getImageData). The full
-  // canvas is read when sw/sh are omitted or <= 0.
+  // Optional sub-rectangle in canvas pixels (mirrors getImageData(sx,sy,sw,sh)).
+  // Omit sw/sh (or set <= 0) to read the full canvas.
   optional int32 sx = 10;
   optional int32 sy = 11;
   optional int32 sw = 12;
@@ -1161,20 +1447,20 @@ message ReadCanvasRequest {
 }
 
 message ReadCanvasResponse {
+  // Whether a <canvas> was found and read.
   bool success = 1;
-  // Frame the canvas was resolved in.
+  // The frameId that contained the canvas.
   string frame_id = 2;
-  // Resolved DevTools backendNodeId of the canvas.
+  // Backend node ID of the canvas that was read.
   int32 backend_node_id = 3;
-  // Encoded image bytes as base64 (PNG by default), or the raw RGBA buffer
-  // when format == "rgba".
+  // Encoded image bytes as base64 (png/jpeg/webp), or the raw RGBA buffer as
+  // base64 when format is "rgba".
   string data_base64 = 4;
-  // Canvas width in pixels.
+  // Pixel width of the returned image (canvas width, or sw if clipped).
   int32 width = 5;
-  // Canvas height in pixels.
+  // Pixel height of the returned image (canvas height, or sh if clipped).
   int32 height = 6;
-  // Whether the canvas was origin-clean (untainted). Informational only —
-  // the read succeeds regardless.
+  // Whether the canvas was actually origin-clean. Informational only.
   bool origin_clean = 7;
 }
 
@@ -1234,6 +1520,12 @@ message StartStreamRequest {
 message StartStreamResponse {
   // The browser's SDP answer to set as the client's remote description.
   string answer_sdp = 1;
+  // Root-viewport size in CSS pixels — the coordinate space the input data
+  // channels expect. Delivered with the answer so the client can map pointer
+  // coordinates from the first frame on, without a getPages() round trip that
+  // races the stream. x/y are always 0. Later changes arrive as
+  // {"type":"viewport","width":W,"height":H} on the reliable "input" channel.
+  Rect viewport = 2;
 }
 
 message StopStreamRequest {

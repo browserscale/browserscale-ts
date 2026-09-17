@@ -49,6 +49,16 @@ import {
   AddReactionRequestSchema,
   RemoveReactionRequestSchema,
   ListReactionsRequestSchema,
+  StartNetworkCaptureRequestSchema,
+  StopNetworkCaptureRequestSchema,
+  StartDomMirrorRequestSchema,
+  StopDomMirrorRequestSchema,
+  GetDomChildrenRequestSchema,
+  ReleaseDomSubtreeRequestSchema,
+  RevealDomNodeRequestSchema,
+  GetDomRevisionRequestSchema,
+  StreamDomEventsRequestSchema,
+  StreamNetworkExchangesRequestSchema,
 } from "./gen/wrc_pb.ts";
 import type { Locator } from "./locator.ts";
 import { DefaultWaitTimeoutMs } from "./defaults.ts";
@@ -62,12 +72,14 @@ import type {
   InterceptedResponse,
   InspectResult,
   NavigateResult,
+  NetworkCaptureOptions,
   PageInfo,
   ScreenshotResult,
   ReadCanvasResult,
   SelectOptionResult,
   WaitResult,
   IceServer,
+  StreamAnswer,
   ReactionInfo,
 } from "./types.ts";
 import type {
@@ -84,6 +96,14 @@ import type {
   WaitOpts,
 } from "./options.ts";
 import type { HeaderModification, RequestPattern } from "./network.ts";
+import { NetworkCapture, type NetworkExchangeHandler } from "./network-capture.ts";
+import {
+  DomMirror,
+  type DomChangeHandler,
+  type DomMirrorOptions,
+  type DomResyncHandler,
+  type DomSnapshot,
+} from "./dom-mirror.ts";
 import type { CookieParam } from "./cookies.ts";
 import type { StorageOriginEntry } from "./storage.ts";
 import type { AuthSession } from "./auth-session.ts";
@@ -1233,6 +1253,381 @@ export class CloudBrowser {
   }
 
   // ──────────────────────────────────────────────────────────────────
+  // Network capture
+  // ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Starts capturing the session's network traffic and returns a live view of
+   * it.
+   *
+   * Every request matching `opts.patterns` is reported once it completes, and
+   * "every request" is literal: capture sits in the browser process rather than
+   * in a page, so cross-process iframes, workers and service workers are
+   * included, the headers are the ones actually put on the wire (Cookie and
+   * Sec-* included), and each hop of a redirect chain arrives as its own
+   * exchange. Requests are never paused, so the page loads at full speed.
+   *
+   * This resolves as soon as the capture is running; onExchange then fires in
+   * the background while you drive the browser. The capture is armed only after
+   * the subscription exists, so nothing that happens after this resolves is
+   * missed. Call {@link NetworkCapture.stop} when done — it disarms the capture
+   * server-side, which an aborted transport alone does not.
+   *
+   * @param opts - which requests to capture and whether to keep bodies
+   * @param onExchange - called per exchange; see {@link NetworkExchangeHandler}
+   *   for the ordering and blocking rules
+   *
+   * @returns NetworkCapture handle for stopping the capture and inspecting how
+   *   it ended
+   *
+   * @throws UNKNOWN_ERROR - the capture could not be started
+   *
+   * @example
+   * const capture = await browser.captureNetwork(
+   *   { patterns: ["*\/api/*"], bodies: "text" },
+   *   (ex) => console.log(ex.statusCode, ex.method, ex.url),
+   * );
+   * try {
+   *   await browser.navigate("https://example.com");
+   * } finally {
+   *   await capture.stop();
+   * }
+   */
+  async captureNetwork(
+    opts: NetworkCaptureOptions,
+    onExchange: NetworkExchangeHandler,
+  ): Promise<NetworkCapture> {
+    const capture = await this.subscribeNetworkExchanges(onExchange);
+    try {
+      await this.startNetworkCapture(opts);
+    } catch (err) {
+      // Not armed yet, so this only tears down the local subscription.
+      await capture.stop();
+      throw err;
+    }
+    capture.arm();
+    return capture;
+  }
+
+  /**
+   * Arms a capture without subscribing to it.
+   *
+   * Use it when the reader lives somewhere else — another tab, or a later
+   * {@link createWebSocketBrowser} against the same session. Most callers want
+   * {@link CloudBrowser.captureNetwork} instead, which arms and subscribes
+   * together. Calling this again replaces the running capture.
+   *
+   * @param opts - which requests to capture and whether to keep bodies
+   *
+   * @throws UNKNOWN_ERROR - the capture could not be started
+   */
+  async startNetworkCapture(opts: NetworkCaptureOptions): Promise<void> {
+    await this.client.startNetworkCapture(
+      create(StartNetworkCaptureRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+        patterns: opts.patterns ?? [],
+        bodies: opts.bodies ?? "none",
+        bodyPatterns: opts.bodyPatterns ?? [],
+      }),
+    );
+  }
+
+  /**
+   * Disarms the session's capture.
+   *
+   * @returns whether a capture was running
+   *
+   * @throws UNKNOWN_ERROR - the capture could not be stopped
+   */
+  async stopNetworkCapture(): Promise<boolean> {
+    const resp = await this.client.stopNetworkCapture(
+      create(StopNetworkCaptureRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+      }),
+    );
+    return resp.stopped;
+  }
+
+  /**
+   * Subscribes to the session's capture without arming one, for reading a
+   * capture that {@link CloudBrowser.startNetworkCapture} armed elsewhere.
+   * Several readers can watch the same capture, each with its own buffer.
+   *
+   * Stopping the returned view detaches this reader and leaves the capture
+   * running, since other readers may still be attached.
+   *
+   * @param onExchange - called per exchange; see {@link NetworkExchangeHandler}
+   *   for the ordering and blocking rules
+   *
+   * @returns NetworkCapture attached to whatever capture is running; onExchange
+   *   simply never fires when none is
+   *
+   * @throws UNKNOWN_ERROR - the subscription could not be opened
+   */
+  async streamNetworkExchanges(
+    onExchange: NetworkExchangeHandler,
+  ): Promise<NetworkCapture> {
+    return this.subscribeNetworkExchanges(onExchange);
+  }
+
+  /**
+   * Opens the stream and waits for the server to acknowledge the subscription
+   * before resolving.
+   *
+   * Merely calling the streaming method does not wait for the server to start
+   * handling it, so arming a capture straight after could outrun the
+   * subscription and lose the first exchanges. The response headers arrive once
+   * the handler is subscribed, and onHeader reports exactly that — over native
+   * gRPC as well as over the WebSocket transport, which forwards the event as
+   * its own frame.
+   */
+  private async subscribeNetworkExchanges(
+    onExchange: NetworkExchangeHandler,
+  ): Promise<NetworkCapture> {
+    const abort = new AbortController();
+    let subscribed!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      subscribed = resolve;
+    });
+
+    const stream = this.client.streamNetworkExchanges(
+      create(StreamNetworkExchangesRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+      }),
+      { signal: abort.signal, onHeader: () => subscribed() },
+    );
+
+    const capture = new NetworkCapture({
+      stream,
+      onExchange,
+      abort,
+      disarm: () => this.stopNetworkCapture(),
+    });
+
+    // A stream that dies before it is acknowledged would leave the wait above
+    // hanging, so race the two outcomes.
+    const ended = capture.wait().then(() => {
+      throw new BrowserScaleError(
+        "browserscale.captureNetwork: stream closed before the subscription was established",
+      );
+    });
+    ended.catch(() => {}); // the loser of the race must not look unhandled
+    await Promise.race([ready, ended]);
+
+    return capture;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // DOM mirror
+  // ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Starts a live copy of a frame's DOM and keeps it up to date.
+   *
+   * The browser sends the top of the tree once, then reports only what changed
+   * in the part you expanded. Everything else costs a child count per batch, no
+   * matter how much churns inside it — which is what makes this usable on a
+   * page that rewrites a list sixty times a second, where re-fetching the
+   * document on a timer is not.
+   *
+   * Expand and collapse as the user opens and closes nodes; that is what moves
+   * the boundary of what gets reported. The returned {@link DomMirror} holds
+   * the tree and exposes `expand`, `collapse` and `reveal`.
+   *
+   * The handler runs after each applied batch. `mirror.root` is a new object
+   * whenever anything under it changed and the untouched parts keep their
+   * identity, so rendering straight from it with memoized components is cheap.
+   *
+   * One mirror covers the whole page as ONE tree. An `<iframe>` is an
+   * ordinary element whose single child is the document it hosts; expanding it
+   * fetches that document and starts mirroring the frame, however deeply
+   * nested and whether or not it is cross-origin. Unlike the inlining
+   * {@link CloudBrowser.getDOM} does, these regions stay live — and frames
+   * nobody opened cost nothing.
+   *
+   * ```ts
+   * const mirror = await browser.mirrorDom({ pierce: true }, () => {
+   *   render(mirror.root);
+   * });
+   * await mirror.expand(bodyNode);
+   * // ...
+   * await mirror.stop();
+   * ```
+   *
+   * @param opts initial depth and whether to pierce shadow roots
+   * @param onChange called after every change, including the first snapshot
+   * @param onResync called when the copy had to be rebuilt, after the new tree
+   *   is in place. Rebuilding is automatic; this is for telling the user why
+   *   their expanded nodes collapsed.
+   * @throws UNKNOWN_ERROR - the mirror could not be started
+   */
+  async mirrorDom(
+    opts: DomMirrorOptions,
+    onChange: DomChangeHandler,
+    onResync?: DomResyncHandler,
+  ): Promise<DomMirror> {
+    const abort = new AbortController();
+    let subscribed!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      subscribed = resolve;
+    });
+
+    const stream = this.client.streamDomEvents(
+      create(StreamDomEventsRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+      }),
+      { signal: abort.signal, onHeader: () => subscribed() },
+    );
+
+    const mirror = new DomMirror({
+      stream,
+      transport: {
+        start: (o) => this.startDomMirror(o),
+        stop: () => this.stopDomMirror(),
+        children: (id, frameId, depth) => this.getDomChildren(id, frameId, depth),
+        release: (id, frameId) => this.releaseDomSubtree(id, frameId),
+        reveal: (id, frameId) => this.revealDomNode(id, frameId),
+      },
+      options: opts,
+      onChange,
+      onResync,
+      abort,
+    });
+
+    // A stream that dies before it is acknowledged would leave the wait below
+    // hanging, so race the two outcomes.
+    const ended = mirror.wait().then(() => {
+      throw new BrowserScaleError(
+        "browserscale.mirrorDom: stream closed before the subscription was established",
+      );
+    });
+    ended.catch(() => {});
+    await Promise.race([ready, ended]);
+
+    // Snapshot only now: taken before the subscription exists, changes between
+    // the two would be lost with nothing to indicate it.
+    try {
+      mirror.install(await this.startDomMirror(opts));
+    } catch (err) {
+      abort.abort();
+      throw err;
+    }
+    onChange(mirror);
+    return mirror;
+  }
+
+  /**
+   * Starts (or restarts) the page's mirror and returns the main document,
+   * without subscribing to changes. {@link CloudBrowser.mirrorDom} is what you
+   * normally want; this is the raw command.
+   */
+  async startDomMirror(opts: DomMirrorOptions = {}): Promise<DomSnapshot> {
+    const req = create(StartDomMirrorRequestSchema, {
+      sessionId: this.sessionId,
+      apiKey: this.apiKey,
+    });
+    if (opts.depth !== undefined) req.depth = opts.depth;
+    if (opts.pierce !== undefined) req.pierce = opts.pierce;
+    const resp = await this.client.startDomMirror(req);
+    return {
+      root: resp.root,
+      frameId: resp.frameId,
+      seq: Number(resp.seq),
+    };
+  }
+
+  /** Stops the page's mirror, every frame of it. Idempotent. */
+  async stopDomMirror(): Promise<void> {
+    await this.client.stopDomMirror(
+      create(StopDomMirrorRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+      }),
+    );
+  }
+
+  /**
+   * Fetches a node's children and starts reporting changes inside them.
+   * {@link DomMirror.expand} calls this and folds the result into the tree.
+   *
+   * On an `<iframe>` the one child is the document it hosts, and this call is
+   * what starts mirroring that frame.
+   */
+  async getDomChildren(
+    backendNodeId: number,
+    frameId: string = "",
+    depth?: number,
+  ): Promise<{ children: string; seq: number }> {
+    const req = create(GetDomChildrenRequestSchema, {
+      sessionId: this.sessionId,
+      apiKey: this.apiKey,
+      backendNodeId,
+    });
+    if (frameId) req.frameId = frameId;
+    if (depth !== undefined) req.depth = depth;
+    const resp = await this.client.getDomChildren(req);
+    return { children: resp.children, seq: Number(resp.seq) };
+  }
+
+  /**
+   * Stops reporting changes inside a node, and inside any frame below it.
+   * {@link DomMirror.collapse} calls this.
+   */
+  async releaseDomSubtree(backendNodeId: number, frameId: string = ""): Promise<void> {
+    const req = create(ReleaseDomSubtreeRequestSchema, {
+      sessionId: this.sessionId,
+      apiKey: this.apiKey,
+      backendNodeId,
+    });
+    if (frameId) req.frameId = frameId;
+    await this.client.releaseDomSubtree(req);
+  }
+
+  /**
+   * Returns the chain from the main document down to a node, each ancestor
+   * with its own children, crossing into frames where it has to and starting
+   * the ones it passes through. {@link DomMirror.reveal} calls this and
+   * splices it in.
+   */
+  async revealDomNode(
+    backendNodeId: number,
+    frameId: string = "",
+  ): Promise<{ path: string; seq: number }> {
+    const req = create(RevealDomNodeRequestSchema, {
+      sessionId: this.sessionId,
+      apiKey: this.apiKey,
+      backendNodeId,
+    });
+    if (frameId) req.frameId = frameId;
+    const resp = await this.client.revealDomNode(req);
+    return { path: resp.path, seq: Number(resp.seq) };
+  }
+
+  /**
+   * A frame's mutation counter, incremented on every change the document sees.
+   * O(1) in the browser and the change detector to poll if you are not
+   * consuming mirror events.
+   *
+   * Prefer this over {@link CloudBrowser.getDOMHash}, which serializes the
+   * whole tree just to hash it. The two answer different questions: a hash
+   * compares content, a revision only says whether this document moved since
+   * you last asked.
+   */
+  async getDomRevision(frameId: string = ""): Promise<number> {
+    const req = create(GetDomRevisionRequestSchema, {
+      sessionId: this.sessionId,
+      apiKey: this.apiKey,
+    });
+    if (frameId) req.frameId = frameId;
+    const resp = await this.client.getDomRevision(req);
+    return Number(resp.revision);
+  }
+
+  // ──────────────────────────────────────────────────────────────────
   // Cookies
   // ──────────────────────────────────────────────────────────────────
 
@@ -1739,22 +2134,22 @@ export class CloudBrowser {
 
   /**
    * Answers your WebRTC SDP offer and starts streaming the page as a video
-   * track, returning the SDP answer to set as your peer's remote description.
-   * The browser is the answerer; you are the offerer (see
+   * track. The browser is the answerer; you are the offerer (see
    * {@link getStreamConfig} for the credentials to build the offer).
    *
    * @param offerSdp - your `RTCPeerConnection`'s SDP offer
    *
-   * @returns the SDP answer to apply as the remote description
+   * @returns the SDP answer to apply as the remote description, plus the
+   *   viewport to map input coordinates into
    *
    * @throws UNKNOWN_ERROR - the offer was empty, TURN is unconfigured, or the
    *   browser could not negotiate the stream
    *
    * @example
-   * const answer = await browser.startStream(offer.sdp);
-   * await pc.setRemoteDescription({ type: "answer", sdp: answer });
+   * const { answerSdp, viewport } = await browser.startStream(offer.sdp);
+   * await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
    */
-  async startStream(offerSdp: string): Promise<string> {
+  async startStream(offerSdp: string): Promise<StreamAnswer> {
     const resp = await this.client.startStream(
       create(StartStreamRequestSchema, {
         sessionId: this.sessionId,
@@ -1762,7 +2157,12 @@ export class CloudBrowser {
         offerSdp,
       }),
     );
-    return resp.answerSdp;
+    return {
+      answerSdp: resp.answerSdp,
+      viewport: resp.viewport
+        ? { width: resp.viewport.width, height: resp.viewport.height }
+        : null,
+    };
   }
 
   /**
