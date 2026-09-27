@@ -132,6 +132,27 @@ service Browser {
   rpc GetStreamConfig(GetStreamConfigRequest) returns (GetStreamConfigResponse);
   rpc StartStream(StartStreamRequest) returns (StartStreamResponse);
   rpc StopStream(StopStreamRequest) returns (StopStreamResponse);
+
+  // Scripts — automation that runs inside the browser process rather than
+  // across the network. The script gets the same `browser.*` surface this
+  // service exposes, but each call is a function call in the browser instead of
+  // a gRPC round trip, so a loop that is unusable at ~50ms per step costs
+  // microseconds. Worth it for anything chatty: waiting for a selector,
+  // scraping a list, walking pagination.
+  //
+  // Two modes, because a script is either something you wait for or something
+  // you leave running. RunScript blocks and hands back the return value with
+  // the whole log, which is what a one-shot caller wants. StartScript returns a
+  // run id immediately and the output arrives on the event stream, which is the
+  // only workable shape for a script that outlives the request.
+  //
+  // Like network capture the stream is a separate subscription, so output
+  // survives a reader reconnect and two readers can watch one run.
+  rpc RunScript(RunScriptRequest) returns (RunScriptResponse);
+  rpc StartScript(StartScriptRequest) returns (StartScriptResponse);
+  rpc StopScripts(StopScriptsRequest) returns (StopScriptsResponse);
+  rpc ListScriptRuns(ListScriptRunsRequest) returns (ListScriptRunsResponse);
+  rpc StreamScriptEvents(StreamScriptEventsRequest) returns (stream ScriptEvent);
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1534,4 +1555,123 @@ message StopStreamRequest {
 }
 
 message StopStreamResponse {}
+
+// ──────────────────────────────────────────────────────────────────────
+// Scripts
+// ──────────────────────────────────────────────────────────────────────
+
+// One console line a script printed.
+message ScriptLogEntry {
+  // "info", "warning" or "error", from console.log / .warn / .error.
+  string level = 1;
+  // The arguments, already stringified the way console does it.
+  string message = 2;
+  // Unix milliseconds, stamped where the script printed rather than where the
+  // line was received, so the log stays ordered across a reconnect.
+  int64 timestamp = 3;
+}
+
+message RunScriptRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // JavaScript source. Runs with `browser` bound to the session, so the script
+  // needs no setup of its own.
+  string source = 3;
+}
+
+// There is deliberately no timeout on RunScript. A deadline is only useful if
+// it can cancel, and cancelling needs the run id — which this call does not
+// learn until the reply it is waiting for. A caller who needs a bound uses
+// StartScript, which hands the id over first, and StopScripts when the bound is
+// hit. A caller who just wants out can StopScripts with no id.
+message RunScriptResponse {
+  bool success = 1;
+  // The script's return value as JSON, "undefined" when it returned nothing,
+  // or the error message when success is false.
+  string result = 2;
+  // The run's id. Arrives too late to follow the run, but names it for a caller
+  // that wants to match up log lines it already saw on the stream.
+  string run_id = 3;
+  // Everything the script logged, in order — whether or not anyone subscribed.
+  repeated ScriptLogEntry log = 4;
+  // True when the script printed more than the reply holds, in which case log
+  // is the tail of the output rather than all of it.
+  bool truncated = 5;
+}
+
+message StartScriptRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string source = 3;
+}
+
+message StartScriptResponse {
+  // Identifies the run for StopScripts, ListScriptRuns and the event stream.
+  string run_id = 1;
+}
+
+message StopScriptsRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // The run to cancel. Empty cancels every run in this session — the
+  // distinction is deliberately explicit, because there is no undo for either.
+  string run_id = 3;
+}
+
+message StopScriptsResponse {
+  int32 stopped = 1;
+}
+
+message ScriptRun {
+  string run_id = 1;
+  // How long the run has been going, in ms. Reported as an age rather than a
+  // start time because that is what the browser knows — it counts from when the
+  // run was accepted, with no clock shared with the caller.
+  int64 running_ms = 2;
+}
+
+message ListScriptRunsRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+message ListScriptRunsResponse {
+  // Only runs still executing. A finished run is reported once on the event
+  // stream and then forgotten; this is not a history.
+  repeated ScriptRun runs = 1;
+}
+
+message StreamScriptEventsRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // Report only this run. Empty reports every run in the session, which is what
+  // a dashboard wants and what a single follower does not.
+  string run_id = 3;
+}
+
+message ScriptLog {
+  string run_id = 1;
+  ScriptLogEntry line = 2;
+}
+
+message ScriptFinished {
+  string run_id = 1;
+  bool success = 2;
+  // The return value as JSON, or the error message when success is false — the
+  // same one field as in RunScriptResponse.
+  string result = 3;
+  // True when the run ended because StopScripts cancelled it, or because the VM
+  // was torn down under it, rather than on its own.
+  bool stopped = 4;
+}
+
+message ScriptEvent {
+  oneof event {
+    ScriptLog log = 1;
+    ScriptFinished finished = 2;
+  }
+  // Cumulative events dropped for this subscriber because it read slower than
+  // the scripts produced them. Non-zero means the log has holes.
+  uint64 dropped = 3;
+}
 

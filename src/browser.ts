@@ -56,6 +56,7 @@ export type {
   DOMResult,
   InspectResult,
   RentResponse,
+  BrowserInfo,
 } from "./types.ts";
 
 // Option bags
@@ -81,6 +82,18 @@ export {
   type HeaderModification,
   type HeaderModificationAction,
 } from "./network.ts";
+
+// Scripts (automation running inside the browser process)
+export {
+  ScriptRun,
+  ScriptFollow,
+  type ScriptEvent,
+  type ScriptEventHandler,
+  type ScriptFinished,
+  type ScriptLogEntry,
+  type ScriptResult,
+  type ScriptRunInfo,
+} from "./scripts.ts";
 
 // Network capture (traffic log)
 export { NetworkCapture, type NetworkExchangeHandler } from "./network-capture.ts";

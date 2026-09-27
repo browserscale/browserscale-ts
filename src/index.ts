@@ -1,7 +1,7 @@
 import { createGrpcTransport } from "@connectrpc/connect-node";
 import { CloudBrowser } from "./client.ts";
 import { BrowserConfig } from "./config.ts";
-import type { RentResponse } from "./types.ts";
+import type { BrowserInfo, RentResponse } from "./types.ts";
 
 // Public API ──────────────────────────────────────────────────────────
 
@@ -57,6 +57,7 @@ export type {
   DOMResult,
   InspectResult,
   RentResponse,
+  BrowserInfo,
   IceServer,
   StreamAnswer,
   ReactionInfo,
@@ -86,6 +87,18 @@ export {
   type HeaderModification,
   type HeaderModificationAction,
 } from "./network.ts";
+
+// Scripts (automation running inside the browser process)
+export {
+  ScriptRun,
+  ScriptFollow,
+  type ScriptEvent,
+  type ScriptEventHandler,
+  type ScriptFinished,
+  type ScriptLogEntry,
+  type ScriptResult,
+  type ScriptRunInfo,
+} from "./scripts.ts";
 
 // Network capture (traffic log)
 export { NetworkCapture, type NetworkExchangeHandler } from "./network-capture.ts";
@@ -215,6 +228,66 @@ export function connectSession(
  */
 export async function stopBrowser(apiKey: string, sessionId: string): Promise<void> {
   await callStopApi(apiKey, sessionId);
+}
+
+/**
+ * Reports the sessions an API key currently holds.
+ *
+ * Use it to recover session ids the process lost — after a restart, or from a
+ * different machine entirely. Without it a rental is only reachable through the
+ * handle that created it, so a crash between rent and stop leaves a paid session
+ * running with nothing able to name it.
+ *
+ * Each entry carries the `grpcUrl` it is driven from, so a listed session can be
+ * handed straight to {@link connectSession}. Only live sessions are listed; a
+ * stopped one is gone, not reported as ended.
+ *
+ * @param apiKey - API key whose sessions to list
+ *
+ * @returns the running sessions, oldest first; empty when the key holds none
+ *
+ * @throws UNKNOWN_ERROR - the list API rejected the request
+ *
+ * @example
+ * const browsers = await listBrowsers(apiKey);
+ * for (const b of browsers) console.log(b.sessionId, b.countryCode);
+ *
+ * // and to drive one of them
+ * const browser = connectSession(browsers[0].grpcUrl, apiKey, browsers[0].sessionId);
+ */
+export async function listBrowsers(apiKey: string): Promise<BrowserInfo[]> {
+  const resp = await fetch(`${apiEndpoint}/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apiKey }),
+  });
+
+  // Named explicitly, because this is the one endpoint a caller can reach on a
+  // deployment that does not have it: listing came after rent and stop. Letting
+  // it fall through would report a JSON parse failure against an error page,
+  // which says nothing about the actual problem.
+  if (resp.status === 404) {
+    throw new Error(`the API at ${apiEndpoint} does not support listing sessions`);
+  }
+
+  const data = await resp.json() as Record<string, unknown>;
+  if (!resp.ok || !data.success) {
+    throw new Error(`list failed: ${data.error ?? resp.statusText}`);
+  }
+
+  const sessions = (data.sessions ?? []) as Record<string, unknown>[];
+  return sessions.map((s) => ({
+    sessionId: s.sessionId as string,
+    grpcUrl: (s.grpcUrl as string) ?? "",
+    startTime: (s.startTime as number) ?? 0,
+    rentDuration: (s.rentDuration as number) ?? 0,
+    remainingSeconds: s.remainingSeconds as number | undefined,
+    countryCode: (s.countryCode as string) ?? "",
+    timezone: (s.timezone as string) ?? "",
+    proxyHost: (s.proxyHost as string) ?? "",
+    publicIp: (s.publicIp as string) ?? "",
+    gpuIndex: s.gpuIndex as number | undefined,
+  }));
 }
 
 // Maps the rent response's gRPC URL to a transport base URL. The scheme

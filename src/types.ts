@@ -430,6 +430,35 @@ export interface RentResponse {
   fingerprint: string;
 }
 
+/** BrowserInfo describes one running session, as `listBrowsers` reports it. */
+export interface BrowserInfo {
+  sessionId: string;
+  /**
+   * The endpoint this session is driven from — the same one rent returned. It is
+   * what makes a listed id usable: pass it to `connectSession`.
+   */
+  grpcUrl: string;
+  /** Unix seconds the session was rented at. */
+  startTime: number;
+  /** The rental length in seconds; 0 means unlimited. */
+  rentDuration: number;
+  /**
+   * Seconds left on the rental, and undefined for an unlimited one — there is
+   * nothing to count down.
+   */
+  remainingSeconds?: number;
+  countryCode: string;
+  timezone: string;
+  proxyHost: string;
+  /** The address the session egresses from. */
+  publicIp: string;
+  /**
+   * The physical card the session renders on, and undefined on a
+   * software-rendered host.
+   */
+  gpuIndex?: number;
+}
+
 /**
  * IceServer is one entry for a WebRTC `RTCPeerConnection`'s `iceServers`
  * config: a TURN (or STUN) URL plus the short-lived credentials to

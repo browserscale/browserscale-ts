@@ -59,6 +59,11 @@ import {
   GetDomRevisionRequestSchema,
   StreamDomEventsRequestSchema,
   StreamNetworkExchangesRequestSchema,
+  RunScriptRequestSchema,
+  StartScriptRequestSchema,
+  StopScriptsRequestSchema,
+  ListScriptRunsRequestSchema,
+  StreamScriptEventsRequestSchema,
 } from "./gen/wrc_pb.ts";
 import type { Locator } from "./locator.ts";
 import { DefaultWaitTimeoutMs } from "./defaults.ts";
@@ -97,6 +102,14 @@ import type {
 } from "./options.ts";
 import type { HeaderModification, RequestPattern } from "./network.ts";
 import { NetworkCapture, type NetworkExchangeHandler } from "./network-capture.ts";
+import {
+  ScriptFollow,
+  ScriptRun,
+  scriptLogEntryFromProto,
+  type ScriptEventHandler,
+  type ScriptResult,
+  type ScriptRunInfo,
+} from "./scripts.ts";
 import {
   DomMirror,
   type DomChangeHandler,
@@ -2293,6 +2306,261 @@ export class CloudBrowser {
     }));
   }
 
+  // ──────────────────────────────────────────────────────────────────
+  // Scripts
+  // ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Runs `source` in the session's browser and waits for it to finish.
+   *
+   * The script executes in a V8 isolate inside the browser process, not in the
+   * page, and reaches the same operations this SDK exposes through a `browser`
+   * object it is handed. The difference is cost: each call is a function call in
+   * the browser rather than a network round trip, so work that is chatty by
+   * nature — polling for a selector, walking a list, following pagination —
+   * runs in microseconds per step instead of tens of milliseconds.
+   *
+   * This waits for as long as the script runs, and cannot be bounded: the run
+   * id needed to cancel only arrives with the reply. Use
+   * {@link CloudBrowser.startScript} when the script may outlive the caller's
+   * patience, or {@link CloudBrowser.stopScripts} to abandon what this session
+   * is running.
+   *
+   * @param source - JavaScript to execute; its return value comes back as JSON
+   *
+   * @returns the return value and the script's whole console output. A script
+   *   that threw is reported as `success: false`, not as a rejection
+   *
+   * @throws UNKNOWN_ERROR - the script could not be delivered to the browser
+   *
+   * @example
+   * const result = await browser.runScript(`
+   *   await browser.navigate("https://example.com");
+   *   const items = [];
+   *   for (const el of await browser.getDOM().querySelectorAll("h1")) {
+   *     items.push(el.textContent);
+   *   }
+   *   return items;
+   * `);
+   * console.log(result.success, result.result);
+   */
+  async runScript(source: string): Promise<ScriptResult> {
+    const resp = await this.client.runScript(
+      create(RunScriptRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+        source,
+      }),
+    );
+    return {
+      success: resp.success,
+      result: resp.result,
+      runId: resp.runId,
+      log: resp.log.map(scriptLogEntryFromProto),
+      truncated: resp.truncated,
+    };
+  }
+
+  /**
+   * Launches `source` in the session's browser and resolves as soon as the run
+   * is under way.
+   *
+   * The counterpart to {@link CloudBrowser.runScript}, for scripts that are not
+   * worth waiting on: a watcher that runs for the life of the session, work
+   * that should survive this page. Output arrives at `onEvent` while the caller
+   * gets on with something else, and {@link ScriptRun.wait} collects the
+   * outcome if it is wanted.
+   *
+   * Subscribing has to happen before the launch, because a detached run's
+   * output is not kept anywhere — the browser rejects a start with nobody
+   * listening rather than discard the script's log and result. This call does
+   * both in that order, so nothing the script prints is missed.
+   *
+   * @param source - JavaScript to execute
+   * @param onEvent - called per log line and once for the outcome; see
+   *   {@link ScriptEventHandler} for the ordering and blocking rules
+   *
+   * @returns ScriptRun handle for awaiting or cancelling the run
+   *
+   * @throws UNKNOWN_ERROR - the run could not be started
+   *
+   * @example
+   * const run = await browser.startScript(source, (ev) => {
+   *   if (ev.log) console.log(ev.log.level, ev.log.message);
+   * });
+   * const outcome = await run.wait();
+   */
+  async startScript(source: string, onEvent: ScriptEventHandler): Promise<ScriptRun> {
+    // Subscribe unfiltered: the run id this handle filters on does not exist
+    // yet. Events for it pile up in the server's per-reader buffer between the
+    // subscription and the launch, which is what that buffer is for.
+    const abort = new AbortController();
+    let subscribed!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      subscribed = resolve;
+    });
+
+    const stream = this.client.streamScriptEvents(
+      create(StreamScriptEventsRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+      }),
+      { signal: abort.signal, onHeader: () => subscribed() },
+    );
+
+    // Opening a stream does not wait for the server to start handling it. For a
+    // capture that would only cost the first few events; here it would fail the
+    // launch outright, since the browser refuses to start a run before a
+    // subscription exists. The headers arrive once it is subscribed.
+    const iterator = stream[Symbol.asyncIterator]();
+    const first = iterator.next();
+    // A stream that fails or closes before it is acknowledged would leave the
+    // wait below hanging, so race the two outcomes. An event arriving ahead of
+    // the headers is not a failure — it proves the subscription exists.
+    const ended = first.then((result) => {
+      if (result.done) {
+        throw new BrowserScaleError(
+          "browserscale.startScript: stream closed before the subscription was established",
+        );
+      }
+    });
+    ended.catch(() => {}); // the loser of the race must not look unhandled
+    try {
+      await Promise.race([ready, ended]);
+    } catch (err) {
+      abort.abort();
+      throw err;
+    }
+
+    let runId: string;
+    try {
+      const resp = await this.client.startScript(
+        create(StartScriptRequestSchema, {
+          sessionId: this.sessionId,
+          apiKey: this.apiKey,
+          source,
+        }),
+      );
+      runId = resp.runId;
+    } catch (err) {
+      abort.abort();
+      throw err;
+    }
+
+    // Resume from the pending read rather than iterating the stream again: the
+    // first next() is already in flight and its value would otherwise be lost.
+    const resumed = resumeStream(iterator, first);
+
+    return new ScriptRun({
+      runId,
+      stream: resumed,
+      onEvent,
+      abort,
+      cancel: (id) => this.stopScripts(id),
+    });
+  }
+
+  /**
+   * Watches script output in this session without starting anything.
+   *
+   * For the case {@link CloudBrowser.startScript} cannot cover: a run somebody
+   * else launched, or one this page started before it reloaded. Several readers
+   * can watch the same session, each with its own buffer.
+   *
+   * Only output produced from now on arrives — lines printed before the
+   * subscription existed are not kept. A run that has already finished is
+   * therefore invisible here; {@link CloudBrowser.listScriptRuns} is how you
+   * tell that apart from a run that is merely quiet.
+   *
+   * @param runId - run to follow, or `""` to follow every run in the session
+   * @param onEvent - called per event; see {@link ScriptEventHandler} for the
+   *   ordering and blocking rules
+   *
+   * @returns ScriptFollow handle for stopping the subscription
+   *
+   * @throws UNKNOWN_ERROR - the subscription could not be opened
+   *
+   * @example
+   * const follow = await browser.followScript(runId, (ev) => {
+   *   if (ev.log) console.log(ev.log.message);
+   * });
+   * try {
+   *   await follow.wait();
+   * } finally {
+   *   await follow.stop();
+   * }
+   */
+  async followScript(runId: string, onEvent: ScriptEventHandler): Promise<ScriptFollow> {
+    const abort = new AbortController();
+    const stream = this.client.streamScriptEvents(
+      create(StreamScriptEventsRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+        runId,
+      }),
+      { signal: abort.signal },
+    );
+    return new ScriptFollow({ stream, onEvent, abort });
+  }
+
+  /**
+   * Cancels runs in this session and reports how many it ended.
+   *
+   * An empty `runId` cancels every run in the session, which is the only form
+   * available to a caller that never learned an id — notably one abandoning a
+   * {@link CloudBrowser.runScript}.
+   *
+   * @param runId - run to cancel, or `""` for all of them
+   *
+   * @returns how many runs were cancelled; 0 when the id named nothing in
+   *   flight
+   *
+   * @throws UNKNOWN_ERROR - the cancel could not be delivered
+   *
+   * @example
+   * await browser.stopScripts(""); // abandon everything running
+   */
+  async stopScripts(runId: string): Promise<number> {
+    const resp = await this.client.stopScripts(
+      create(StopScriptsRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+        runId,
+      }),
+    );
+    return resp.stopped;
+  }
+
+  /**
+   * Reports the scripts still running in this session.
+   *
+   * Only runs in flight — a finished run is reported once on the event stream
+   * and then forgotten, so this is not a history. Its use is finding work this
+   * caller did not start: a script a previous page left behind, which
+   * {@link CloudBrowser.stopScripts} needs an id to name.
+   *
+   * @returns one entry per run still executing
+   *
+   * @throws UNKNOWN_ERROR - the session could not be queried
+   *
+   * @example
+   * for (const run of await browser.listScriptRuns()) {
+   *   console.log(run.runId, run.runningMs);
+   * }
+   */
+  async listScriptRuns(): Promise<ScriptRunInfo[]> {
+    const resp = await this.client.listScriptRuns(
+      create(ListScriptRunsRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+      }),
+    );
+    return resp.runs.map((run) => ({
+      runId: run.runId,
+      runningMs: Number(run.runningMs),
+    }));
+  }
+
   /**
    * @internal — a reaction match/action must be a css()/js() locator: node()
    * and at() are rejected (a reaction watches for a condition, like a wait).
@@ -2308,5 +2576,24 @@ export class CloudBrowser {
         `browserscale.${cmd}: ${role} must have a CSS selector or JS expression`,
       );
     }
+  }
+}
+
+/**
+ * Continues an async iterator whose first read is already in flight.
+ *
+ * startScript has to know the subscription exists before it launches anything,
+ * and the only way to make the client send the request is to start reading. That
+ * read cannot be discarded — it may already hold the run's first log line — so
+ * the reader is handed a stream that replays it before continuing.
+ */
+async function* resumeStream<T>(
+  iterator: AsyncIterator<T>,
+  first: Promise<IteratorResult<T>>,
+): AsyncGenerator<T> {
+  let result = await first;
+  while (!result.done) {
+    yield result.value;
+    result = await iterator.next();
   }
 }

@@ -78,6 +78,19 @@ Rent an isolated browser session in seconds, automate it with human-like input, 
   offset, with live form state (typed values, checkbox state, `<select>`
   options) and a node handle to act on. A model reasons over what matters
   instead of raw HTML, and doesn't need a JS round-trip to ask where it is.
+- **Scripts that run inside the browser** — `runScript` sends JavaScript to the
+  session and runs it in the browser process itself, with a `browser` object
+  giving it the same operations this SDK exposes — but as local calls rather than
+  network round trips, so a loop that polls or walks a list costs microseconds
+  per step instead of tens of milliseconds. The log streams back as the script
+  produces it. `startScript` leaves a script running without the caller, which is
+  how work outlives the process that started it, and `followScript` attaches to
+  one already under way.
+- **Sessions you can find again** — `listBrowsers` reports what an API key is
+  paying for: ids, proxy, egress address and remaining rental. A session
+  therefore outlives the process that rented it — recover it after a restart, or
+  from another machine entirely, and hand the `grpcUrl` it reports straight to
+  `connectSession`.
 - **Flow-optimized TypeScript** — fully typed promise-based API, `wait` races
   multiple outcomes, JS locators target elements by page logic when CSS is
   not enough. Runs in Node.js (native gRPC) and the browser (WebSocket via
@@ -133,11 +146,13 @@ reports the element that occluded the click.
 | --- | --- |
 | `rentBrowser(cfg)` | Rent a fresh session (`new BrowserConfig(key, secs, host, port, user, pass)`). |
 | `connectSession(grpcUrl, apiKey, sessionId)` | Attach to an existing session by id (from a prior rent). |
+| `listBrowsers(apiKey)` | The sessions a key currently holds, each with the `grpcUrl` to hand to `connectSession`. |
 | `browser.navigate(url, opts?)` | Load a URL. |
 | `browser.wait(condition, opts?)` | Wait for a locator condition; returns the matched `frameId`. |
 | `browser.click(target, opts?)` | Human-like click; throws a rich `ClickError` on failure. |
 | `browser.fill(target, text, opts?)` | Per-key typing that fires real input events; `insertText` for bulk commit. |
 | `browser.evaluate(expr)` | Run JS in the page/frame and get a typed value back. |
+| `browser.runScript(source)` | Run JavaScript in the browser process, where every operation is a local call; `startScript` leaves it running, `followScript` watches one already going. |
 | `browser.getObservation(opts?)` | Compact, node-handle-tagged view of the visible page across frames; `opts` tunes budgets and format. |
 | `browser.captureNetwork(opts, onExchange)` | Stream every request the session completes, optionally with response bodies. |
 | `browser.mirrorDom(opts, onChange, onResync?)` | Live, incrementally updated copy of the page's DOM across every frame. |
