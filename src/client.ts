@@ -2313,12 +2313,14 @@ export class CloudBrowser {
   /**
    * Runs `source` in the session's browser and waits for it to finish.
    *
-   * The script executes in a V8 isolate inside the browser process, not in the
-   * page, and reaches the same operations this SDK exposes through a `browser`
-   * object it is handed. The difference is cost: each call is a function call in
-   * the browser rather than a network round trip, so work that is chatty by
-   * nature — polling for a selector, walking a list, following pagination —
-   * runs in microseconds per step instead of tens of milliseconds.
+   * The script runs beside the browser, in a V8 isolate of its own rather than
+   * in the page, and reaches the document through the engine: a cross-origin
+   * `<iframe>` is read as plain `contentDocument` with no frame ids anywhere,
+   * values come back as live objects it can assign to rather than snapshots, an
+   * element can be handed straight to `browser.click`, and the page sees nothing
+   * injected. Steps cost microseconds rather than network round trips, so work
+   * that is chatty by nature — polling for a selector, walking a list,
+   * following pagination — is affordable there. A guide for it is still to come.
    *
    * This waits for as long as the script runs, and cannot be bounded: the run
    * id needed to cancel only arrives with the reply. Use
