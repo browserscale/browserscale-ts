@@ -205,6 +205,11 @@ export interface NetworkCaptureOptions {
  * argument order) and where the matched element lives.
  */
 export interface WaitResult {
+  /**
+   * False iff nothing matched before the deadline. Redundant with `index` being
+   * -1, and carried so every command answers the same question the same way.
+   */
+  success: boolean;
   index: number;
   frameId: string;
   backendNodeId: number;
@@ -326,6 +331,13 @@ export interface NavigateResult {
  * purely a TS hint, not a runtime guarantee.
  */
 export interface EvaluateResult<T = unknown> {
+  /**
+   * False only when the expression never produced a value, which rejects the
+   * call — so a resolved result always has this true. An expression that answers
+   * falsy is a successful evaluation, so this does not mean "the answer was
+   * false".
+   */
+  success: boolean;
   value: T;
   backendNodeId: number;
   isVisible: boolean;

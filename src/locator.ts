@@ -1,4 +1,3 @@
-import { DefaultSteadyMs, DefaultVisible } from "./defaults.ts";
 import { BrowserScaleError } from "./errors.ts";
 
 /**
@@ -65,9 +64,9 @@ export class Locator {
    * Enforces or disables the visibility check for this Locator's wait
    * condition.
    *
-   * Pass `false` to opt out of the default `DefaultVisible` (true). Has
-   * no effect when used as an action target — actions never check
-   * visibility before dispatching.
+   * Visibility is required by default, so pass `false` to wait for DOM
+   * presence alone. Has no effect when used as an action target — actions
+   * never check visibility before dispatching.
    *
    * @param v - true to require visibility, false to skip the check
    *
@@ -84,9 +83,9 @@ export class Locator {
    * Requires the element to keep a stable position and size for at least
    * `ms` milliseconds before the wait matches.
    *
-   * Pass 0 to disable the default `DefaultSteadyMs` (500). Has no effect
-   * for js() expressions that return a non-Element value, nor when used
-   * as an action target.
+   * Settling defaults to 500ms, so pass 0 to match the instant the element
+   * is found. Has no effect for js() expressions that return a non-Element
+   * value, nor when used as an action target.
    *
    * @param ms - steady-state duration in milliseconds; 0 disables
    *
@@ -155,20 +154,12 @@ export class Locator {
 
   /** @internal */
   static _css(selector: string): Locator {
-    return new Locator({
-      selector,
-      visibleFlag: DefaultVisible,
-      steadyMs: DefaultSteadyMs,
-    });
+    return new Locator({ selector });
   }
 
   /** @internal */
   static _js(expression: string): Locator {
-    return new Locator({
-      jsExpression: expression,
-      visibleFlag: DefaultVisible,
-      steadyMs: DefaultSteadyMs,
-    });
+    return new Locator({ jsExpression: expression });
   }
 
   /** @internal */
@@ -190,9 +181,10 @@ export class Locator {
  * css waits for / targets an element matching the given CSS selector.
  *
  * When used in {@link CloudBrowser.wait}/{@link CloudBrowser.waitAny}, the
- * returned Locator carries the SDK defaults `DefaultVisible` (true) and
- * `DefaultSteadyMs` (500). Override per call with `.visible(false)` /
- * `.steady(ms)` (use `.steady(0)` to disable the steady check).
+ * condition requires the element to be visible and to hold still for 500ms
+ * before it matches — the API's defaults for a condition that does not set
+ * them. Override per call with `.visible(false)` / `.steady(ms)` (use
+ * `.steady(0)` to disable the steady check).
  *
  * When used as an action target (click, fill, …) the visible/steady
  * fields are ignored — there are no corresponding fields on the action
@@ -215,8 +207,8 @@ export function css(selector: string): Locator {
 /**
  * js waits for / targets the result of a JavaScript expression.
  *
- * Same wait defaults as {@link css} (`DefaultVisible`=true,
- * `DefaultSteadyMs`=500); these only apply when the expression returns a
+ * Same wait defaults as {@link css} (visible, 500ms steady); these only
+ * apply when the expression returns a
  * DOM Element. For non-Element truthy values (boolean, string, number,
  * plain object) both fields are no-ops and the condition matches as soon
  * as the value is truthy. Use `.visible(false)` / `.steady(0)` to opt out.

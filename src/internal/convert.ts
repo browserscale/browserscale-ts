@@ -293,6 +293,7 @@ function waitConditionStatusFromProto(c: ProtoWaitConditionStatus): WaitConditio
 /** Maps a WaitResult; throws {@link WaitError} when no condition matched before the deadline. */
 export function unwrapWait(r: ProtoWaitResult): WaitResult {
   const res: WaitResult = {
+    success: r.success,
     index: r.index,
     frameId: r.frameId,
     backendNodeId: r.backendNodeId,

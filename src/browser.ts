@@ -10,7 +10,7 @@ export { BrowserConfig } from "./config.ts";
 // Locator + constructors + AllFrames sentinel
 export { Locator, css, js, node, at, AllFrames } from "./locator.ts";
 
-// Defaults the SDK applies before sending a request
+// Server-side defaults, re-exported for reference only (all deprecated)
 export {
   DefaultWaitTimeoutMs,
   DefaultVisible,

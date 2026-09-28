@@ -229,7 +229,8 @@ export class ScriptRun {
    *
    * @returns how the script ended
    *
-   * @throws UNKNOWN_ERROR - the outcome could not be observed
+   * Rejects only on a transport failure - the connection dying, or the run being
+   * abandoned. A script that threw is a normal outcome and arrives in the result.
    */
   async wait(): Promise<ScriptFinished> {
     await this.endedPromise;
@@ -248,8 +249,8 @@ export class ScriptRun {
    * at its next operation in the page. Either way the handler sees a `finished`
    * with `stopped` set, unless the local reader is torn down first.
    *
-   * @throws UNKNOWN_ERROR - the run could not be cancelled server-side; the
-   *   local reader is detached regardless
+   * Rejects only on a transport failure, and the local reader is detached
+   * regardless. Cancelling a run that has already finished is a no-op.
    */
   async stop(): Promise<void> {
     if (this.detached) return;

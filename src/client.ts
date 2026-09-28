@@ -66,8 +66,7 @@ import {
   StreamScriptEventsRequestSchema,
 } from "./gen/wrc_pb.ts";
 import type { Locator } from "./locator.ts";
-import { DefaultWaitTimeoutMs } from "./defaults.ts";
-import { BrowserScaleError } from "./errors.ts";
+import { BrowserScaleError, CommandError, throwCommandError } from "./errors.ts";
 import type {
   DOMResult,
   DragResult,
@@ -150,9 +149,7 @@ type BrowserRpcClient = Client<typeof Browser>;
  * CloudBrowser is the SDK-side handle for an active browserscale browser session.
  *
  * One CloudBrowser corresponds to exactly one browser context, which
- * always has at least one page. The session is implicitly bound to its
- * primary page server-side — the proto's page_id field is currently
- * ignored server-side, so the SDK never sets it.
+ * always has at least one page; its commands act on the primary page.
  *
  * Construct via rentBrowser() / createWebSocketBrowser() — never
  * directly.
@@ -207,7 +204,8 @@ export class CloudBrowser {
    * {@link createWebSocketBrowser} the rental stays untouched; only the
    * transport is closed.
    *
-   * @throws UNKNOWN_ERROR - the stop API or the transport close failed
+   * Rejects only when the stop API or the transport close fails. The session is
+   * released either way; retrying a stop is safe.
    *
    * @example
    * await browser.stopBrowser();
@@ -234,7 +232,9 @@ export class CloudBrowser {
    * @param proxyUsername - proxy auth user; empty for unauthenticated proxies
    * @param proxyPassword - proxy auth password; empty for unauthenticated proxies
    *
-   * @throws UNKNOWN_ERROR - the proxy could not be applied
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * await browser.setProxy("proxy.example.com", 8080, "user", "pass");
@@ -255,7 +255,8 @@ export class CloudBrowser {
       if (proxyUsername) req.proxyUsername = proxyUsername;
       if (proxyPassword) req.proxyPassword = proxyPassword;
     }
-    await this.client.setProxy(req);
+    const res = await this.client.setProxy(req);
+    throwCommandError("setProxy", res.error);
   }
 
   /**
@@ -268,7 +269,9 @@ export class CloudBrowser {
    *
    * @returns PageInfo[] for every page currently open in the context
    *
-   * @throws UNKNOWN_ERROR - the pages could not be enumerated
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * const pages = await browser.getPages();
@@ -281,6 +284,7 @@ export class CloudBrowser {
         apiKey: this.apiKey,
       }),
     );
+    throwCommandError("getPages", resp.error);
     return resp.pages.map(pageInfoFromProto);
   }
 
@@ -301,7 +305,16 @@ export class CloudBrowser {
    * @returns NavigateResult with the final resolved URL and the frameId
    *   of the main frame after navigation
    *
-   * @throws UNKNOWN_ERROR - the navigation failed or timed out
+   * @throws timeout - nothing committed before the deadline; the page may still
+   *   be loading, so a longer timeout can be the whole fix
+   * @throws net_error - the URL never loaded: DNS, TLS, a refused connection, or
+   *   a proxy that could not reach it. The message carries the underlying net
+   *   error name, which is what separates a bad proxy from a bad host - worth
+   *   logging, since the two need different fixes
+   * @throws crashed - the renderer died mid-navigation; the page is unusable and
+   *   has to be navigated again
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    *
    * @example
    * await browser.navigate("https://example.com");
@@ -314,6 +327,7 @@ export class CloudBrowser {
     });
     if (opts?.timeoutMs) req.timeout = opts.timeoutMs;
     const resp = await this.client.navigate(req);
+    throwCommandError("navigate", resp.error);
     return { frameId: resp.frameId, url: resp.url };
   }
 
@@ -329,7 +343,11 @@ export class CloudBrowser {
    * @param html - response body to serve
    * @param opts - optional headers and statusCode (default 200)
    *
-   * @throws UNKNOWN_ERROR - the interceptor could not be installed
+   * @throws timeout - the page never requested the URL, so the prepared
+   *   response had nobody to hand it to; usually the navigation was cancelled
+   *   or redirected away before reaching it
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    *
    * @example
    * await browser.loadHTML("https://example.com", "<h1>hi</h1>");
@@ -344,7 +362,8 @@ export class CloudBrowser {
       headers: headersToProto(opts?.headers),
     });
     if (opts?.statusCode) req.statusCode = opts.statusCode;
-    await this.client.loadHTML(req);
+    const res = await this.client.loadHTML(req);
+    throwCommandError("loadHTML", res.error);
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -363,16 +382,34 @@ export class CloudBrowser {
    * The generic T is a TypeScript hint only — there is no runtime
    * validation that the JS expression actually returned that type.
    *
+   * A falsy answer and a broken expression are different outcomes. Returning
+   * null, false or undefined is a successful evaluation and resolves normally;
+   * an expression that throws or will not compile rejects with a
+   * {@link CommandError}, so a typo can never read as "the page says null".
+   *
    * @param expression - JavaScript expression evaluated in the main frame
    *
    * @returns EvaluateResult with either value (non-Element) or element
    *   metadata (Element)
    *
-   * @throws UNKNOWN_ERROR - the expression threw or could not be compiled
+   * @throws {@link CommandError} - code `"threw"` (the expression raised; the
+   *   message carries the exception text), `"not_run"` (it could not be
+   *   compiled, or execution never started), `"aborted"` (the browser stopped
+   *   execution) or `"no_context"` (the frame had no live script context)
    *
    * @example
    * const res = await browser.evaluate<string>("document.title");
    * console.log(res.value);
+   *
+   * @example
+   * // Telling a false answer from a broken expression.
+   * try {
+   *   const res = await browser.evaluate<boolean>("window.__ready === true");
+   *   if (!res.value) { /* legitimately not ready yet *\/ }
+   * } catch (e) {
+   *   if (e instanceof CommandError) throw new Error(`expression broken: ${e.message}`);
+   *   throw e;
+   * }
    */
   async evaluate<T = unknown>(expression: string): Promise<EvaluateResult<T>> {
     return this._evaluate<T>("", expression);
@@ -412,6 +449,15 @@ export class CloudBrowser {
     });
     if (frameId) req.frameId = frameId;
     const resp = await this.client.evaluate(req);
+    // An expression that threw arrives as success=false in the payload, not as a
+    // transport error, so it is raised here rather than by the call above.
+    if (resp.error) {
+      throw new CommandError({
+        command: "evaluate",
+        code: resp.error.code,
+        message: resp.error.message,
+      });
+    }
     let value: T | null = null;
     if (resp.result !== "") {
       try {
@@ -421,6 +467,7 @@ export class CloudBrowser {
       }
     }
     return {
+      success: resp.success,
       value: value as T,
       backendNodeId: resp.backendNodeId,
       isVisible: resp.isVisible,
@@ -515,7 +562,8 @@ export class CloudBrowser {
       sessionId: this.sessionId,
       apiKey: this.apiKey,
       conditions: pbConds,
-      timeout: opts?.timeoutMs ?? DefaultWaitTimeoutMs,
+      // Left unset unless the caller passed one, so the API applies its default.
+      timeout: opts?.timeoutMs,
     });
     if (frameId) req.frameId = frameId;
 
@@ -865,7 +913,9 @@ export class CloudBrowser {
    * @returns DOMResult with the JSON string in `.dom` (the `.hash` field
    *   is populated by {@link getDOMHash}, not by this call)
    *
-   * @throws UNKNOWN_ERROR - the DOM could not be retrieved
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * const { dom } = await browser.getDOM();
@@ -878,6 +928,7 @@ export class CloudBrowser {
     if (frameId) req.frameId = frameId;
     if (opts?.depth !== undefined) req.depth = opts.depth;
     const resp = await this.client.getDOM(req);
+    throwCommandError("getDOM", resp.error);
     return { hash: "", dom: resp.dom };
   }
 
@@ -893,7 +944,9 @@ export class CloudBrowser {
    *
    * @returns 16-char hex string (the first 8 bytes of sha256 of the DOM JSON)
    *
-   * @throws UNKNOWN_ERROR - the hash could not be computed
+   * Rejects only on a transport failure. The hash is computed from a serialized
+   * tree, so there is no semantic failure of its own and no error codes to branch
+   * on.
    *
    * @example
    * const hash = await browser.getDOMHash();
@@ -942,7 +995,11 @@ export class CloudBrowser {
    *
    * @returns the observation in the requested format, ready to hand to a model
    *
-   * @throws UNKNOWN_ERROR - the observation could not be produced
+   * @throws not_found - the requested scope root is not on the page, so there
+   *   was nothing to observe. Distinct from an observation that comes back
+   *   empty, which means the scope exists and holds nothing worth reporting
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    *
    * @example
    * const obs = await browser.getObservation();
@@ -966,6 +1023,7 @@ export class CloudBrowser {
     if (opts?.jsExpression !== undefined) req.jsExpression = opts.jsExpression;
     if (opts?.frameId !== undefined) req.frameId = opts.frameId;
     const resp = await this.client.getObservation(req);
+    throwCommandError("getObservation", resp.error);
     return resp.observation;
   }
 
@@ -983,7 +1041,11 @@ export class CloudBrowser {
    * @returns ScreenshotResult with the base64 image in `dataBase64` and the
    *   physical pixel `width`/`height`
    *
-   * @throws UNKNOWN_ERROR - the screenshot could not be captured
+   * @throws capture_failed - the page had no frame to copy. A page that has not
+   *   produced one yet, or is not being composited at the moment, has nothing to
+   *   hand over; retrying after it renders usually works
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    *
    * @example
    * const shot = await browser.screenshot({ format: "png" });
@@ -997,6 +1059,7 @@ export class CloudBrowser {
     if (opts?.format !== undefined) req.format = opts.format;
     if (opts?.quality !== undefined) req.quality = opts.quality;
     const resp = await this.client.screenshot(req);
+    throwCommandError("screenshot", resp.error);
     return {
       dataBase64: resp.dataBase64,
       width: resp.width,
@@ -1021,11 +1084,15 @@ export class CloudBrowser {
    *   canvas `width`/`height`, resolved `frameId`/`backendNodeId` and the
    *   `originClean` flag
    *
-   * @throws INVALID_LOCATOR - target is empty, uses at(x,y), or has multiple targets
-   * @throws ELEMENT_NOT_FOUND - no element matched the locator
-   * @throws FRAME_NOT_FOUND - the requested frame does not exist
-   * @throws TIMEOUT - the operation exceeded the server-side timeout
-   * @throws PAGE_NOT_ALIVE - the page has been closed
+   * @throws not_found - no element matched the locator
+   * @throws not_element - the expression was truthy but did not yield an element
+   * @throws not_readable - the target was found but is not a readable canvas
+   *
+   * A target that is empty, uses `at(x, y)` or names several things at once is
+   * rejected before anything is sent. A closed page or a frame that is gone is a
+   * transport failure rather than a code.
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    *
    * @example
    * const res = await browser.readCanvas(css("#game canvas"));
@@ -1058,6 +1125,7 @@ export class CloudBrowser {
       req.sh = opts.sh;
     }
     const resp = await this.client.readCanvas(req);
+    throwCommandError("readCanvas", resp.error);
     return {
       success: resp.success,
       frameId: resp.frameId,
@@ -1083,7 +1151,9 @@ export class CloudBrowser {
    *
    * @param patterns - URL wildcards to block; empty array clears the list
    *
-   * @throws UNKNOWN_ERROR - the blocklist could not be applied
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * await browser.setBlockList([
@@ -1092,13 +1162,14 @@ export class CloudBrowser {
    * ]);
    */
   async setBlockList(patterns: string[]): Promise<void> {
-    await this.client.setBlockList(
+    const res = await this.client.setBlockList(
       create(SetBlockListRequestSchema, {
         sessionId: this.sessionId,
         apiKey: this.apiKey,
         patterns,
       }),
     );
+    throwCommandError("setBlockList", res.error);
   }
 
   /**
@@ -1113,13 +1184,15 @@ export class CloudBrowser {
    * @param blobName - server-side identifier of the snapshot to serve from
    * @param patterns - URL wildcards to redirect to the cache; empty disables
    *
-   * @throws UNKNOWN_ERROR - the static paths could not be configured
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * await browser.setStaticPaths("snap-2026-05", ["*.example.com/*"]);
    */
   async setStaticPaths(blobName: string, patterns: string[]): Promise<void> {
-    await this.client.setStaticPaths(
+    const res = await this.client.setStaticPaths(
       create(SetStaticPathsRequestSchema, {
         sessionId: this.sessionId,
         apiKey: this.apiKey,
@@ -1127,6 +1200,7 @@ export class CloudBrowser {
         patterns,
       }),
     );
+    throwCommandError("setStaticPaths", res.error);
   }
 
   /**
@@ -1144,7 +1218,12 @@ export class CloudBrowser {
    *   (the captured method/URL/headers/body; null if intercepted with
    *   no body)
    *
-   * @throws UNKNOWN_ERROR - the wait timed out or no patterns were supplied
+   * @throws timeout - no request matched any pattern before the deadline.
+   *   Nothing occurring is an answer, and it stays distinguishable from a
+   *   connection that died on the way. Supplying no patterns is a caller mistake
+   *   rather than an outcome, and rejects separately
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    *
    * @example
    * const { index, request } = await browser.waitForAnyRequest(
@@ -1169,6 +1248,7 @@ export class CloudBrowser {
     });
     if (opts?.timeoutMs) req.timeout = opts.timeoutMs;
     const resp = await this.client.waitForAnyRequest(req);
+    throwCommandError("waitForAnyRequest", resp.error);
     return {
       index: resp.index,
       request: interceptedRequestFromProto(resp.request),
@@ -1187,6 +1267,13 @@ export class CloudBrowser {
    *
    * @returns object with `index` (matched pattern index) and `response`
    *   (the captured status/headers/body; null if no body was returned)
+   *
+   * @throws timeout - no response matched any pattern before the deadline.
+   *   Nothing occurring is an answer, and it stays distinguishable from a
+   *   connection that died on the way. Supplying no patterns is a caller mistake
+   *   rather than an outcome, and rejects separately
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    *
    * @example
    * const { index, response } = await browser.waitForAnyResponse(
@@ -1211,6 +1298,7 @@ export class CloudBrowser {
     });
     if (opts?.timeoutMs) req.timeout = opts.timeoutMs;
     const resp = await this.client.waitForAnyResponse(req);
+    throwCommandError("waitForAnyResponse", resp.error);
     return {
       index: resp.index,
       response: interceptedResponseFromProto(resp.response),
@@ -1233,7 +1321,10 @@ export class CloudBrowser {
    *   were actually sent on the wire after modifications were applied;
    *   null when no request payload was reported
    *
-   * @throws UNKNOWN_ERROR - no matching request appeared within the timeout
+   * @throws timeout - no matching request appeared before the deadline, so
+   *   nothing was modified
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    *
    * @example
    * const req = await browser.modifyRequest("*\/api/me", {
@@ -1262,6 +1353,7 @@ export class CloudBrowser {
     if (opts?.body) req.body = opts.body;
     if (opts?.timeoutMs) req.timeout = opts.timeoutMs;
     const resp = await this.client.modifyRequest(req);
+    throwCommandError("modifyRequest", resp.error);
     return interceptedRequestFromProto(resp.request);
   }
 
@@ -1293,7 +1385,9 @@ export class CloudBrowser {
    * @returns NetworkCapture handle for stopping the capture and inspecting how
    *   it ended
    *
-   * @throws UNKNOWN_ERROR - the capture could not be started
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * const capture = await browser.captureNetwork(
@@ -1332,10 +1426,12 @@ export class CloudBrowser {
    *
    * @param opts - which requests to capture and whether to keep bodies
    *
-   * @throws UNKNOWN_ERROR - the capture could not be started
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    */
   async startNetworkCapture(opts: NetworkCaptureOptions): Promise<void> {
-    await this.client.startNetworkCapture(
+    const res = await this.client.startNetworkCapture(
       create(StartNetworkCaptureRequestSchema, {
         sessionId: this.sessionId,
         apiKey: this.apiKey,
@@ -1344,6 +1440,7 @@ export class CloudBrowser {
         bodyPatterns: opts.bodyPatterns ?? [],
       }),
     );
+    throwCommandError("startNetworkCapture", res.error);
   }
 
   /**
@@ -1351,7 +1448,8 @@ export class CloudBrowser {
    *
    * @returns whether a capture was running
    *
-   * @throws UNKNOWN_ERROR - the capture could not be stopped
+   * Rejects only on a transport failure. Stopping a capture that is not running
+   * is a no-op rather than a failure, so there are no error codes to branch on.
    */
   async stopNetworkCapture(): Promise<boolean> {
     const resp = await this.client.stopNetworkCapture(
@@ -1360,6 +1458,7 @@ export class CloudBrowser {
         apiKey: this.apiKey,
       }),
     );
+    throwCommandError("stopNetworkCapture", resp.error);
     return resp.stopped;
   }
 
@@ -1377,7 +1476,8 @@ export class CloudBrowser {
    * @returns NetworkCapture attached to whatever capture is running; onExchange
    *   simply never fires when none is
    *
-   * @throws UNKNOWN_ERROR - the subscription could not be opened
+   * Rejects only on a transport failure: opening the subscription has no semantic
+   * failure of its own.
    */
   async streamNetworkExchanges(
     onExchange: NetworkExchangeHandler,
@@ -1475,7 +1575,10 @@ export class CloudBrowser {
    * @param onResync called when the copy had to be rebuilt, after the new tree
    *   is in place. Rebuilding is automatic; this is for telling the user why
    *   their expanded nodes collapsed.
-   * @throws UNKNOWN_ERROR - the mirror could not be started
+   * @throws mirror_failed - the page could not be serialized, usually a document
+   *   that went away while the tree was being built. No mirror is left running
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    */
   async mirrorDom(
     opts: DomMirrorOptions,
@@ -1537,6 +1640,11 @@ export class CloudBrowser {
    * Starts (or restarts) the page's mirror and returns the main document,
    * without subscribing to changes. {@link CloudBrowser.mirrorDom} is what you
    * normally want; this is the raw command.
+   *
+   * @throws mirror_failed - the page could not be serialized, usually a document
+   *   that went away while the tree was being built. No mirror is left running
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    */
   async startDomMirror(opts: DomMirrorOptions = {}): Promise<DomSnapshot> {
     const req = create(StartDomMirrorRequestSchema, {
@@ -1546,6 +1654,7 @@ export class CloudBrowser {
     if (opts.depth !== undefined) req.depth = opts.depth;
     if (opts.pierce !== undefined) req.pierce = opts.pierce;
     const resp = await this.client.startDomMirror(req);
+    throwCommandError("startDomMirror", resp.error);
     return {
       root: resp.root,
       frameId: resp.frameId,
@@ -1555,12 +1664,13 @@ export class CloudBrowser {
 
   /** Stops the page's mirror, every frame of it. Idempotent. */
   async stopDomMirror(): Promise<void> {
-    await this.client.stopDomMirror(
+    const res = await this.client.stopDomMirror(
       create(StopDomMirrorRequestSchema, {
         sessionId: this.sessionId,
         apiKey: this.apiKey,
       }),
     );
+    throwCommandError("stopDomMirror", res.error);
   }
 
   /**
@@ -1569,6 +1679,17 @@ export class CloudBrowser {
    *
    * On an `<iframe>` the one child is the document it hosts, and this call is
    * what starts mirroring that frame.
+   *
+   * An id that is simply unknown is not a failure: the call resolves with an
+   * empty result.
+   *
+   * @throws not_mirrored - the page has no mirror, or frameId is not part of the
+   *   one it has; start a mirror first, and after a resync fetch the current tree
+   *   before addressing nodes again
+   * @throws mirror_failed - the subtree could not be serialized, usually a
+   *   document that went away mid-read
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    */
   async getDomChildren(
     backendNodeId: number,
@@ -1583,12 +1704,20 @@ export class CloudBrowser {
     if (frameId) req.frameId = frameId;
     if (depth !== undefined) req.depth = depth;
     const resp = await this.client.getDomChildren(req);
+    throwCommandError("getDomChildren", resp.error);
     return { children: resp.children, seq: Number(resp.seq) };
   }
 
   /**
    * Stops reporting changes inside a node, and inside any frame below it.
    * {@link DomMirror.collapse} calls this.
+   *
+   * @throws not_mirrored - the page has no mirror, or frameId is not part of
+   *   the one it has; this is what replaying ids from a tree that has since
+   *   been resynced looks like, so fetch the current tree and address the node
+   *   again
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    */
   async releaseDomSubtree(backendNodeId: number, frameId: string = ""): Promise<void> {
     const req = create(ReleaseDomSubtreeRequestSchema, {
@@ -1597,7 +1726,8 @@ export class CloudBrowser {
       backendNodeId,
     });
     if (frameId) req.frameId = frameId;
-    await this.client.releaseDomSubtree(req);
+    const res = await this.client.releaseDomSubtree(req);
+    throwCommandError("releaseDomSubtree", res.error);
   }
 
   /**
@@ -1605,6 +1735,16 @@ export class CloudBrowser {
    * with its own children, crossing into frames where it has to and starting
    * the ones it passes through. {@link DomMirror.reveal} calls this and
    * splices it in.
+   *
+   * An id that is simply unknown is not a failure: the call resolves with an
+   * empty result.
+   *
+   * @throws not_mirrored - the page has no mirror, or frameId is not part of the
+   *   one it has
+   * @throws mirror_failed - the path could not be serialized, usually a document
+   *   that went away mid-read
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    */
   async revealDomNode(
     backendNodeId: number,
@@ -1617,6 +1757,7 @@ export class CloudBrowser {
     });
     if (frameId) req.frameId = frameId;
     const resp = await this.client.revealDomNode(req);
+    throwCommandError("revealDomNode", resp.error);
     return { path: resp.path, seq: Number(resp.seq) };
   }
 
@@ -1629,6 +1770,10 @@ export class CloudBrowser {
    * whole tree just to hash it. The two answer different questions: a hash
    * compares content, a revision only says whether this document moved since
    * you last asked.
+   *
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    */
   async getDomRevision(frameId: string = ""): Promise<number> {
     const req = create(GetDomRevisionRequestSchema, {
@@ -1637,6 +1782,7 @@ export class CloudBrowser {
     });
     if (frameId) req.frameId = frameId;
     const resp = await this.client.getDomRevision(req);
+    throwCommandError("getDomRevision", resp.error);
     return Number(resp.revision);
   }
 
@@ -1649,7 +1795,9 @@ export class CloudBrowser {
    *
    * @returns CookieParam[], one per cookie in the context
    *
-   * @throws UNKNOWN_ERROR - the cookies could not be read
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * const cookies = await browser.getCookies();
@@ -1662,6 +1810,7 @@ export class CloudBrowser {
         apiKey: this.apiKey,
       }),
     );
+    throwCommandError("getCookies", resp.error);
     return resp.cookies.map(cookieParamFromProto);
   }
 
@@ -1673,7 +1822,9 @@ export class CloudBrowser {
    *
    * @param cookies - cookies to write; empty array is a no-op
    *
-   * @throws UNKNOWN_ERROR - the cookies could not be written
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * await browser.setCookies([
@@ -1681,30 +1832,34 @@ export class CloudBrowser {
    * ]);
    */
   async setCookies(cookies: CookieParam[]): Promise<void> {
-    await this.client.setCookies(
+    const res = await this.client.setCookies(
       create(SetCookiesRequestSchema, {
         sessionId: this.sessionId,
         apiKey: this.apiKey,
         cookies: cookieParamsToProto(cookies),
       }),
     );
+    throwCommandError("setCookies", res.error);
   }
 
   /**
    * Deletes every cookie in the browser context.
    *
-   * @throws UNKNOWN_ERROR - the cookies could not be cleared
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * await browser.clearCookies();
    */
   async clearCookies(): Promise<void> {
-    await this.client.clearCookies(
+    const res = await this.client.clearCookies(
       create(ClearCookiesRequestSchema, {
         sessionId: this.sessionId,
         apiKey: this.apiKey,
       }),
     );
+    throwCommandError("clearCookies", res.error);
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -1724,7 +1879,9 @@ export class CloudBrowser {
    *
    * @returns StorageOriginEntry[], one per origin with localStorage data
    *
-   * @throws UNKNOWN_ERROR - the storage could not be read
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * const storage = await browser.getStorage();
@@ -1739,6 +1896,7 @@ export class CloudBrowser {
     });
     if (origin) req.origin = origin;
     const resp = await this.client.getStorage(req);
+    throwCommandError("getStorage", resp.error);
     return resp.storage.map(storageEntryFromProto);
   }
 
@@ -1753,7 +1911,9 @@ export class CloudBrowser {
    *
    * @param storage - entries to write, grouped by origin
    *
-   * @throws UNKNOWN_ERROR - the storage could not be written
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * await browser.setStorage([
@@ -1767,13 +1927,14 @@ export class CloudBrowser {
    * ]);
    */
   async setStorage(storage: StorageOriginEntry[]): Promise<void> {
-    await this.client.setStorage(
+    const res = await this.client.setStorage(
       create(SetStorageRequestSchema, {
         sessionId: this.sessionId,
         apiKey: this.apiKey,
         storage: storageEntriesToProto(storage),
       }),
     );
+    throwCommandError("setStorage", res.error);
   }
 
   /**
@@ -1782,7 +1943,9 @@ export class CloudBrowser {
    * @param origin - if set, only this origin's storage is deleted
    *   (e.g. "https://example.com"); omit to delete all origins
    *
-   * @throws UNKNOWN_ERROR - the storage could not be cleared
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * // Wipe one origin.
@@ -1797,7 +1960,8 @@ export class CloudBrowser {
       apiKey: this.apiKey,
     });
     if (origin) req.origin = origin;
-    await this.client.clearStorage(req);
+    const res = await this.client.clearStorage(req);
+    throwCommandError("clearStorage", res.error);
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -1814,7 +1978,9 @@ export class CloudBrowser {
    *
    * @returns AuthSession, or undefined when there is nothing to export
    *
-   * @throws UNKNOWN_ERROR - the auth session could not be read
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * const auth = await browser.getAuthSession();
@@ -1827,6 +1993,7 @@ export class CloudBrowser {
         apiKey: this.apiKey,
       }),
     );
+    throwCommandError("getAuthSession", resp.error);
     return resp.session ? authSessionFromProto(resp.session) : undefined;
   }
 
@@ -1839,20 +2006,23 @@ export class CloudBrowser {
    *
    * @param session - session as returned by getAuthSession()
    *
-   * @throws UNKNOWN_ERROR - the auth session could not be written
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * await browser.setAuthSession(saved);
    * await browser.navigate("https://mail.google.com");
    */
   async setAuthSession(session: AuthSession): Promise<void> {
-    await this.client.setAuthSession(
+    const res = await this.client.setAuthSession(
       create(SetAuthSessionRequestSchema, {
         sessionId: this.sessionId,
         apiKey: this.apiKey,
         session: authSessionToProto(session),
       }),
     );
+    throwCommandError("setAuthSession", res.error);
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -1874,7 +2044,9 @@ export class CloudBrowser {
    * @returns InspectResult with the resolved backendNodeId, frameId, tag
    *   name, trimmed textContent, visibility and bounds
    *
-   * @throws UNKNOWN_ERROR - the hit-test failed
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * const r = await browser.inspectAtPosition(200, 300);
@@ -1889,6 +2061,7 @@ export class CloudBrowser {
         y,
       }),
     );
+    throwCommandError("inspectAtPosition", resp.error);
     return {
       backendNodeId: resp.backendNodeId,
       frameId: resp.frameId,
@@ -1909,7 +2082,9 @@ export class CloudBrowser {
    * @param frameId - id of the frame the node lives in; empty string
    *   targets the main frame
    *
-   * @throws UNKNOWN_ERROR - the highlight could not be applied
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * await browser.highlightNode(res.backendNodeId, res.frameId);
@@ -1921,7 +2096,8 @@ export class CloudBrowser {
       backendNodeId,
     });
     if (frameId) req.frameId = frameId;
-    await this.client.highlightNode(req);
+    const res = await this.client.highlightNode(req);
+    throwCommandError("highlight", res.error);
   }
 
   /**
@@ -1934,19 +2110,24 @@ export class CloudBrowser {
    *
    * @param text - the text to insert at the caret
    *
-   * @throws UNKNOWN_ERROR - the text could not be inserted
+   * @throws no_focus - nothing in the page holds focus, so there is no caret to
+   *   insert at; click the field first
+   * @throws busy - another action is already running on this page
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    *
    * @example
    * await browser.insertText("hello world");
    */
   async insertText(text: string): Promise<void> {
-    await this.client.insertText(
+    const res = await this.client.insertText(
       create(InsertTextRequestSchema, {
         sessionId: this.sessionId,
         apiKey: this.apiKey,
         text,
       }),
     );
+    throwCommandError("insertText", res.error);
   }
 
   /**
@@ -1969,7 +2150,10 @@ export class CloudBrowser {
    * @param opts - optional: `clearFirst` clears the focused field (Ctrl+A,
    *   Delete) before typing
    *
-   * @throws UNKNOWN_ERROR - the page/context was torn down mid-stream
+   * `type` has no semantic failure of its own: the keys land wherever focus
+   * happens to be, so there is no target it can miss. Only the page or context
+   * being torn down mid-stream surfaces, and that is a transport failure rather
+   * than a code.
    *
    * @example
    * // OTP field that auto-advances across boxes.
@@ -1983,7 +2167,7 @@ export class CloudBrowser {
       text,
     });
     if (opts?.clearFirst) req.clearFirst = true;
-    await this.client.type(req);
+    throwCommandError("type", (await this.client.type(req)).error);
   }
 
   /**
@@ -1999,7 +2183,11 @@ export class CloudBrowser {
    *   `modifiers` (bit-flag: Alt=1, Ctrl=2, Meta=4, Shift=8),
    *   `location` (0=standard, 1=left, 2=right, 3=numpad)
    *
-   * @throws UNKNOWN_ERROR - the event could not be dispatched
+   * @throws no_focus - nothing in the page holds focus, so the key has nowhere
+   *   to go; click the field first
+   * @throws busy - another action is already running on this page
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    *
    * @example
    * // Ctrl+A
@@ -2018,7 +2206,8 @@ export class CloudBrowser {
     if (opts?.code) req.code = opts.code;
     if (opts?.modifiers !== undefined) req.modifiers = opts.modifiers;
     if (opts?.location !== undefined) req.location = opts.location;
-    await this.client.pressKey(req);
+    const res = await this.client.pressKey(req);
+    throwCommandError("pressKey", res.error);
   }
 
   /**
@@ -2045,7 +2234,8 @@ export class CloudBrowser {
     if (opts?.code) req.code = opts.code;
     if (opts?.modifiers !== undefined) req.modifiers = opts.modifiers;
     if (opts?.location !== undefined) req.location = opts.location;
-    await this.client.releaseKey(req);
+    const res = await this.client.releaseKey(req);
+    throwCommandError("releaseKey", res.error);
   }
 
   /**
@@ -2057,7 +2247,9 @@ export class CloudBrowser {
    *
    * @returns the selected text, or `""` when nothing is selected
    *
-   * @throws UNKNOWN_ERROR - the selection could not be read
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * const sel = await browser.getSelection();
@@ -2070,6 +2262,7 @@ export class CloudBrowser {
         apiKey: this.apiKey,
       }),
     );
+    throwCommandError("getSelection", resp.error);
     return resp.text;
   }
 
@@ -2092,8 +2285,10 @@ export class CloudBrowser {
    *
    * @returns empty string on success — the solution is applied server-side
    *
-   * @throws UNKNOWN_ERROR - no captcha appeared within timeoutMs, or the
-   *   detected captcha could not be solved within retryAmount attempts
+   * Rejects when no captcha appeared within 	imeoutMs, or when the one that did
+   * could not be solved within 
+etryAmount attempts. Neither carries a code:
+   * solving runs outside the page, so there is no per-command code set here.
    *
    * @example
    * await browser.solveCaptcha({ retryAmount: 2 });
@@ -2125,7 +2320,8 @@ export class CloudBrowser {
    *
    * @returns the ICE servers for the client `RTCPeerConnection`
    *
-   * @throws UNKNOWN_ERROR - TURN is not configured on the server
+   * Rejects when TURN is not configured on the server. That is a deployment
+   * condition rather than a per-call outcome, so it carries no code.
    *
    * @example
    * const ice = await browser.getStreamConfig();
@@ -2155,8 +2351,16 @@ export class CloudBrowser {
    * @returns the SDP answer to apply as the remote description, plus the
    *   viewport to map input coordinates into
    *
-   * @throws UNKNOWN_ERROR - the offer was empty, TURN is unconfigured, or the
-   *   browser could not negotiate the stream
+   * @throws already_active - a stream is already running on this session; stop it
+   *   before starting another
+   * @throws negotiation_failed - the browser could not agree on a connection. The
+   *   message carries the negotiator's own diagnostic, which is usually where the
+   *   actual cause is
+   *
+   * An empty offer or an unconfigured TURN setup is a caller mistake rather than
+   * an outcome, and rejects separately.
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    *
    * @example
    * const { answerSdp, viewport } = await browser.startStream(offer.sdp);
@@ -2170,6 +2374,7 @@ export class CloudBrowser {
         offerSdp,
       }),
     );
+    throwCommandError("startStream", resp.error);
     return {
       answerSdp: resp.answerSdp,
       viewport: resp.viewport
@@ -2182,18 +2387,20 @@ export class CloudBrowser {
    * Tears down the live video stream for the session's page. Safe to call even
    * if no stream is running.
    *
-   * @throws UNKNOWN_ERROR - the stream could not be stopped
+   * Rejects only on a transport failure. Stopping a stream that is not running is
+   * a no-op rather than a failure, so there are no error codes to branch on.
    *
    * @example
    * await browser.stopStream();
    */
   async stopStream(): Promise<void> {
-    await this.client.stopStream(
+    const res = await this.client.stopStream(
       create(StopStreamRequestSchema, {
         sessionId: this.sessionId,
         apiKey: this.apiKey,
       }),
     );
+    throwCommandError("stopStream", res.error);
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -2201,10 +2408,10 @@ export class CloudBrowser {
   // ──────────────────────────────────────────────────────────────────
 
   /**
-   * Registers a one-shot "reaction": a background poller (one shared loop per
-   * page) watches for the `match` locator and, as soon as it matches, clicks it
-   * with the full smart-click machinery (scroll, human path, occlusion gate,
-   * evade) — then removes itself. The poller yields to any in-flight input
+   * Registers a one-shot "reaction": the browser watches for the `match`
+   * locator in the background and, as soon as it matches, clicks it the same
+   * way {@link CloudBrowser.click} does (scroll, human path, occlusion check) —
+   * then removes itself. The reaction yields to any in-flight input
    * action and only fires while the pointer is idle, so a reaction naturally
    * slots into the gaps of a retrying foreground action (e.g. it dismisses a
    * newsletter modal blocking a {@link CloudBrowser.click}, after which the
@@ -2253,6 +2460,7 @@ export class CloudBrowser {
     if (opts?.clickCount) req.clickCount = opts.clickCount;
     if (opts?.intervalMs) req.interval = opts.intervalMs;
     const resp = await this.client.addReaction(req);
+    throwCommandError("addReaction", resp.error);
     return resp.reactionId;
   }
 
@@ -2263,6 +2471,10 @@ export class CloudBrowser {
    * @param reactionId - id returned by {@link CloudBrowser.addReaction}
    *
    * @returns true if a pending reaction with this id existed and was removed
+   *
+   * Removing an id that is not registered is a no-op rather than an error, so the
+   * returned boolean - not a rejection - is what tells you whether anything was
+   * there. Rejects only on a transport failure.
    *
    * @example
    * const removed = await browser.removeReaction(id);
@@ -2275,6 +2487,7 @@ export class CloudBrowser {
         reactionId,
       }),
     );
+    throwCommandError("removeReaction", resp.error);
     return resp.removed;
   }
 
@@ -2283,6 +2496,10 @@ export class CloudBrowser {
    * Reactions that have already fired (one-shot) are not included.
    *
    * @returns the pending reactions for the page
+   *
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
    *
    * @example
    * const pending = await browser.listReactions();
@@ -2295,6 +2512,7 @@ export class CloudBrowser {
         apiKey: this.apiKey,
       }),
     );
+    throwCommandError("listReactions", resp.error);
     return resp.reactions.map((r) => ({
       reactionId: r.reactionId,
       matchSelector: r.matchSelector ?? "",
@@ -2333,7 +2551,10 @@ export class CloudBrowser {
    * @returns the return value and the script's whole console output. A script
    *   that threw is reported as `success: false`, not as a rejection
    *
-   * @throws UNKNOWN_ERROR - the script could not be delivered to the browser
+   * Rejects only on a transport failure. A script that fails to compile or throws
+   * is not a rejection: the returned result has success: false and 
+esult holds
+   * the message, so a broken script stays distinguishable from a broken connection.
    *
    * @example
    * const result = await browser.runScript(`
@@ -2384,7 +2605,8 @@ export class CloudBrowser {
    *
    * @returns ScriptRun handle for awaiting or cancelling the run
    *
-   * @throws UNKNOWN_ERROR - the run could not be started
+   * Rejects only on a transport failure: a script that fails to compile or throws
+   * surfaces on the run itself rather than here.
    *
    * @example
    * const run = await browser.startScript(source, (ev) => {
@@ -2480,7 +2702,8 @@ export class CloudBrowser {
    *
    * @returns ScriptFollow handle for stopping the subscription
    *
-   * @throws UNKNOWN_ERROR - the subscription could not be opened
+   * Rejects only on a transport failure: opening the subscription has no semantic
+   * failure of its own.
    *
    * @example
    * const follow = await browser.followScript(runId, (ev) => {
@@ -2517,7 +2740,9 @@ export class CloudBrowser {
    * @returns how many runs were cancelled; 0 when the id named nothing in
    *   flight
    *
-   * @throws UNKNOWN_ERROR - the cancel could not be delivered
+   * Rejects only on a transport failure. Cancelling runs that have already
+   * finished, or none at all, is a no-op - read the returned count to learn how
+   * many were actually stopped.
    *
    * @example
    * await browser.stopScripts(""); // abandon everything running
@@ -2543,7 +2768,9 @@ export class CloudBrowser {
    *
    * @returns one entry per run still executing
    *
-   * @throws UNKNOWN_ERROR - the session could not be queried
+   * Rejects only on a transport failure - a dead session, a broken connection.
+   * This call has no semantic failure of its own, so there are no error codes to
+   * branch on.
    *
    * @example
    * for (const run of await browser.listScriptRuns()) {

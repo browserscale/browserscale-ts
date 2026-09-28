@@ -1,6 +1,6 @@
 {
   "name": "browserscale-ts",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "description": "Official SDK for browserscale — undetected stealth browsers in the cloud. Rent real Chromium sessions with unique fingerprints, built-in proxies, captcha solving, human-like input and live video — scale web scraping and automation without running a single browser yourself.",
   "main": "dist/index.js",
   "type": "module",

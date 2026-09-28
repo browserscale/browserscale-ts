@@ -116,7 +116,7 @@ export interface SelectOpts {
 
 /** Optional customization for {@link CloudBrowser.wait} / {@link CloudBrowser.waitForAny}. */
 export interface WaitOpts {
-  /** Default `DefaultWaitTimeoutMs` (30 000 ms). */
+  /** Omitted leaves it to the API, which defaults to 30 000 ms. */
   timeoutMs?: number;
 }
 

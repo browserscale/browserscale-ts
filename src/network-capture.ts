@@ -119,8 +119,9 @@ export class NetworkCapture {
    * {@link CloudBrowser.stopNetworkCapture} instead: stop awaits the reader,
    * which cannot finish while the handler it called is still running.
    *
-   * @throws UNKNOWN_ERROR - the capture could not be disarmed; the local reader
-   *   is shut down regardless
+   * Rejects only on a transport failure, and the local reader is shut down
+   * regardless. Disarming a capture that is not running is a no-op rather than a
+   * failure, so there are no error codes to branch on.
    */
   async stop(): Promise<void> {
     if (this.stopped) return;

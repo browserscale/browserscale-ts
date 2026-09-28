@@ -21,6 +21,7 @@ export {
 // Errors — base class plus the typed semantic-failure subclasses
 export {
   BrowserScaleError,
+  CommandError,
   ClickError,
   FillError,
   DragError,
@@ -153,8 +154,9 @@ export function setApiEndpoint(endpoint: string): void {
  *
  * @returns CloudBrowser ready to drive the rented session
  *
- * @throws UNKNOWN_ERROR - the rent API rejected the request or the gRPC
- *   connection could not be established
+ * Rejects when the rent API refuses the request or the connection cannot be
+ * established. These are session-lifecycle failures rather than browser outcomes,
+ * so they carry no code.
  *
  * @example
  * const cfg = new BrowserConfig("sk_…", 600, "", 0, "", "");
@@ -221,7 +223,8 @@ export function connectSession(
  * @param apiKey - API key the session was rented with
  * @param sessionId - id of the session to release
  *
- * @throws UNKNOWN_ERROR - the stop API rejected the request
+ * Rejects when the stop API refuses the request. Stopping a session that is
+ * already gone is a no-op rather than a failure.
  *
  * @example
  * await stopBrowser(apiKey, sessionId);
@@ -246,7 +249,8 @@ export async function stopBrowser(apiKey: string, sessionId: string): Promise<vo
  *
  * @returns the running sessions, oldest first; empty when the key holds none
  *
- * @throws UNKNOWN_ERROR - the list API rejected the request
+ * Rejects when the list API refuses the request. An account with no running
+ * sessions is an empty list, not a failure.
  *
  * @example
  * const browsers = await listBrowsers(apiKey);

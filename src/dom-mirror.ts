@@ -293,6 +293,14 @@ export class DomMirror {
    * boundary was crossed; it is a child list like any other.
    *
    * @param depth levels below the node, default 1
+   *
+   * @throws not_mirrored - the page has no mirror, or the node's frame is not
+   *   part of the one it has; after a resync, fetch the current tree before
+   *   addressing nodes again
+   * @throws mirror_failed - the subtree could not be serialized, usually a
+   *   document that went away mid-read
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    */
   async expand(node: DomNode, depth?: number): Promise<void> {
     if (this.stopped) return;
@@ -323,6 +331,13 @@ export class DomMirror {
    *
    * Skipping this is not an error, it is a slow leak: the browser's revealed
    * set only grows, and eventually it is no longer filtering anything.
+   *
+   * @throws not_mirrored - the page has no mirror, or the node's frame is not
+   *   part of the one it has; this is what collapsing a node from a tree that has
+   *   since been resynced looks like, so fetch the current tree and address the
+   *   node again
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    */
   async collapse(node: DomNode): Promise<void> {
     if (this.stopped) return;
@@ -350,6 +365,13 @@ export class DomMirror {
    *
    * @returns the ancestor chain, the main document first, or an empty array if
    *   the node is not on the page
+   *
+   * @throws not_mirrored - the page has no mirror, or the given frame is not part
+   *   of the one it has
+   * @throws mirror_failed - the path could not be serialized, usually a document
+   *   that went away mid-read
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    */
   async reveal(backendNodeId: number, frameId?: string): Promise<DomNode[]> {
     if (this.stopped) return [];
@@ -403,6 +425,11 @@ export class DomMirror {
    * Throws away the local copy of the whole page and fetches a fresh one.
    * Happens automatically whenever the browser says the copy is void, so you
    * rarely need to call it.
+   *
+   * @throws mirror_failed - the page could not be serialized, usually a document
+   *   that went away while the tree was being rebuilt. The mirror then ends
+   *
+   * @see {@link CommandError} for reading the code off the rejection
    */
   async resync(reason: DomResyncReason = "manual"): Promise<void> {
     if (this.stopped) return;

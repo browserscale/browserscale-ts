@@ -20,16 +20,15 @@ import "google/protobuf/empty.proto";
 
 service Browser {
   // Context-level
-  rpc SetProxy(SetProxyRequest) returns (google.protobuf.Empty);
+  rpc SetProxy(SetProxyRequest) returns (CommandResult);
   rpc GetPages(GetPagesRequest) returns (GetPagesResponse);
 
   // Page navigation / content
   rpc Navigate(NavigateRequest) returns (NavigateResponse);
-  rpc LoadHTML(LoadHTMLRequest) returns (google.protobuf.Empty);
+  rpc LoadHTML(LoadHTMLRequest) returns (CommandResult);
 
   // Evaluation
   rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
-  rpc Run(RunRequest) returns (RunResponse);
 
   // Waiting
   rpc WaitForAny(WaitForAnyParams) returns (WaitResult);
@@ -50,8 +49,8 @@ service Browser {
   rpc ListReactions(ListReactionsRequest) returns (ListReactionsResponse);
 
   // Network interception
-  rpc SetBlockList(SetBlockListRequest) returns (google.protobuf.Empty);
-  rpc SetStaticPaths(SetStaticPathsRequest) returns (google.protobuf.Empty);
+  rpc SetBlockList(SetBlockListRequest) returns (CommandResult);
+  rpc SetStaticPaths(SetStaticPathsRequest) returns (CommandResult);
   rpc WaitForAnyRequest(WaitForAnyRequestRequest) returns (WaitForAnyRequestResponse);
   rpc WaitForAnyResponse(WaitForAnyResponseRequest) returns (WaitForAnyResponseResponse);
   rpc ModifyRequest(ModifyRequestRequest) returns (ModifyRequestResponse);
@@ -60,30 +59,30 @@ service Browser {
   // completes. Start/Stop are session state; the stream is a separate
   // subscription, so a capture survives a reader reconnect and two readers
   // can watch one capture.
-  rpc StartNetworkCapture(StartNetworkCaptureRequest) returns (google.protobuf.Empty);
+  rpc StartNetworkCapture(StartNetworkCaptureRequest) returns (CommandResult);
   rpc StopNetworkCapture(StopNetworkCaptureRequest) returns (StopNetworkCaptureResponse);
   rpc StreamNetworkExchanges(StreamNetworkExchangesRequest) returns (stream NetworkExchangeEvent);
 
   // Cookies
   rpc GetCookies(GetCookiesRequest) returns (GetCookiesResponse);
-  rpc SetCookies(SetCookiesRequest) returns (google.protobuf.Empty);
-  rpc ClearCookies(ClearCookiesRequest) returns (google.protobuf.Empty);
+  rpc SetCookies(SetCookiesRequest) returns (CommandResult);
+  rpc ClearCookies(ClearCookiesRequest) returns (CommandResult);
 
   // Storage (localStorage)
   rpc GetStorage(GetStorageRequest) returns (GetStorageResponse);
-  rpc SetStorage(SetStorageRequest) returns (google.protobuf.Empty);
-  rpc ClearStorage(ClearStorageRequest) returns (google.protobuf.Empty);
+  rpc SetStorage(SetStorageRequest) returns (CommandResult);
+  rpc ClearStorage(ClearStorageRequest) returns (CommandResult);
 
   // Auth / DBSC (portable signed-in persona)
   rpc GetAuthSession(GetAuthSessionRequest) returns (GetAuthSessionResponse);
-  rpc SetAuthSession(SetAuthSessionRequest) returns (google.protobuf.Empty);
+  rpc SetAuthSession(SetAuthSessionRequest) returns (CommandResult);
 
   // DOM / observation
   rpc GetDOM(GetDOMRequest) returns (GetDOMResponse);
   rpc GetDOMHash(GetDOMHashRequest) returns (GetDOMHashResponse);
   rpc GetObservation(GetObservationRequest) returns (GetObservationResponse);
   rpc InspectAtPosition(InspectAtPositionRequest) returns (InspectAtPositionResponse);
-  rpc HighlightNode(HighlightNodeRequest) returns (google.protobuf.Empty);
+  rpc HighlightNode(HighlightNodeRequest) returns (CommandResult);
 
   // DOM mirror — an incremental view of the page's DOM, as ONE tree.
   // StartDomMirror returns the top of the main document and from then on the
@@ -103,9 +102,9 @@ service Browser {
   // and resyncs on ONE channel: a resync means "everything you hold is void",
   // which is only interpretable in order against the batches around it.
   rpc StartDomMirror(StartDomMirrorRequest) returns (StartDomMirrorResponse);
-  rpc StopDomMirror(StopDomMirrorRequest) returns (google.protobuf.Empty);
+  rpc StopDomMirror(StopDomMirrorRequest) returns (CommandResult);
   rpc GetDomChildren(GetDomChildrenRequest) returns (GetDomChildrenResponse);
-  rpc ReleaseDomSubtree(ReleaseDomSubtreeRequest) returns (google.protobuf.Empty);
+  rpc ReleaseDomSubtree(ReleaseDomSubtreeRequest) returns (CommandResult);
   rpc RevealDomNode(RevealDomNodeRequest) returns (RevealDomNodeResponse);
   rpc GetDomRevision(GetDomRevisionRequest) returns (GetDomRevisionResponse);
   rpc StreamDomEvents(StreamDomEventsRequest) returns (stream DomEvent);
@@ -115,10 +114,10 @@ service Browser {
   rpc ReadCanvas(ReadCanvasRequest) returns (ReadCanvasResponse);
 
   // Keyboard / IME (used by the live browser UI on top of the WebRTC stream)
-  rpc InsertText(InsertTextRequest) returns (google.protobuf.Empty);
-  rpc Type(TypeRequest) returns (google.protobuf.Empty);
-  rpc PressKey(PressKeyRequest) returns (google.protobuf.Empty);
-  rpc ReleaseKey(ReleaseKeyRequest) returns (google.protobuf.Empty);
+  rpc InsertText(InsertTextRequest) returns (CommandResult);
+  rpc Type(TypeRequest) returns (CommandResult);
+  rpc PressKey(PressKeyRequest) returns (CommandResult);
+  rpc ReleaseKey(ReleaseKeyRequest) returns (CommandResult);
   rpc GetSelection(GetSelectionRequest) returns (GetSelectionResponse);
 
   // Captcha solver
@@ -131,7 +130,7 @@ service Browser {
   // that offer.
   rpc GetStreamConfig(GetStreamConfigRequest) returns (GetStreamConfigResponse);
   rpc StartStream(StartStreamRequest) returns (StartStreamResponse);
-  rpc StopStream(StopStreamRequest) returns (StopStreamResponse);
+  rpc StopStream(StopStreamRequest) returns (CommandResult);
 
   // Scripts — automation that runs inside the browser process rather than
   // across the network. The script gets the same `browser.*` surface this
@@ -255,6 +254,9 @@ message WaitResult {
   int32 backend_node_id = 3;
   bool is_visible = 4;
   Rect bounds = 5;
+  // False iff nothing matched before the deadline. Redundant with index -1, and
+  // carried anyway so every command answers the same question the same way.
+  bool success = 7;
   // Present iff no condition matched before the deadline (index is -1): the
   // per-condition breakdown of why nothing matched. A timeout is a normal
   // result, not an RPC error.
@@ -334,9 +336,31 @@ message OccluderInfo {
   optional string position = 13;
 }
 
+// The shape every error detail here shares, and the type used directly by
+// commands with nothing to report beyond what went wrong. Present in a result
+// iff that command's success is false.
+//
+// Genuine transport failures — a malformed request, a dead session, the page
+// going away — stay gRPC errors and never arrive here. This only ever describes
+// a semantic outcome: the browser worked and the page did not cooperate.
+message CommandError {
+  // Machine-stable, lowercase, scoped to the command that returned it.
+  string code = 1;
+  // Human-readable detail, possibly empty. Never parse this; parse code.
+  string message = 2;
+}
+
+// What the commands that have nothing else to report return, in place of the
+// empty response they used to give. Every command answers whether it worked, so
+// a semantic refusal never has to be inferred from the absence of an error, and
+// a command that grows a failure mode later does not change shape.
+message CommandResult {
+  bool success = 1;
+  optional CommandError error = 2;
+}
+
 // Error detail for a Click that did not land. Present in ClickResult iff
-// success is false. First instance of the per-command WRCError<Command>
-// convention; other commands migrate to the same shape later.
+// success is false. CommandError plus the occlusion specifics.
 message ClickError {
   // Machine-stable failure code, e.g. "occluded_no_reachable_point" or
   // "occluded_after_evade".
@@ -415,6 +439,11 @@ message AddReactionRequest {
 message AddReactionResponse {
   // Id of the registered reaction (pass to RemoveReaction).
   string reaction_id = 1;
+  // Always true today: this command has no semantic failure of its own. Both
+  // fields are carried so every response answers the same question the same
+  // way, and so a future failure mode is an added code, not a new shape.
+  bool success = 2;
+  optional CommandError error = 3;
 }
 
 message RemoveReactionRequest {
@@ -427,6 +456,11 @@ message RemoveReactionRequest {
 message RemoveReactionResponse {
   // True if a pending reaction with this id existed and was removed.
   bool removed = 1;
+  // Always true today: this command has no semantic failure of its own. Both
+  // fields are carried so every response answers the same question the same
+  // way, and so a future failure mode is an added code, not a new shape.
+  bool success = 2;
+  optional CommandError error = 3;
 }
 
 message ListReactionsRequest {
@@ -437,6 +471,11 @@ message ListReactionsRequest {
 
 message ListReactionsResponse {
   repeated ReactionInfo reactions = 1;
+  // Always true today: this command has no semantic failure of its own. Both
+  // fields are carried so every response answers the same question the same
+  // way, and so a future failure mode is an added code, not a new shape.
+  bool success = 2;
+  optional CommandError error = 3;
 }
 
 // Error detail for a Fill that did not complete. Present in FillResult iff
@@ -601,6 +640,11 @@ message GetPagesRequest {
 
 message GetPagesResponse {
   repeated PageInfo pages = 1;
+  // Always true today: this command has no semantic failure of its own. Both
+  // fields are carried so every response answers the same question the same
+  // way, and so a future failure mode is an added code, not a new shape.
+  bool success = 2;
+  optional CommandError error = 3;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -619,6 +663,10 @@ message NavigateRequest {
 message NavigateResponse {
   string frame_id = 1;
   string url = 2;
+  // False iff the command refused; then error carries the code. See the
+  // protocol definition for which codes this command can return.
+  bool success = 3;
+  optional CommandError error = 4;
 }
 
 message LoadHTMLRequest {
@@ -652,25 +700,11 @@ message EvaluateResponse {
   int32 backend_node_id = 2;
   bool is_visible = 3;
   Rect bounds = 4;
-}
-
-// Run executes a JavaScript automation script inside the God-VM — a bare V8
-// isolate that lives outside every renderer.
-message RunRequest {
-  string session_id = 1;
-  string api_key = 2;
-  // JavaScript source to execute in the God-VM.
-  string source = 3;
-  // Page the script should be able to drive (reserved; frame bridge wired in a
-  // follow-up). Optional for now — ignored server-side.
-  optional string page_id = 4;
-}
-
-message RunResponse {
-  // False if compilation or execution threw; then `result` holds the message.
-  bool success = 1;
-  // JSON-serialized result value (or "undefined"), or the error message.
-  string result = 2;
+  // False iff the expression never produced a value (then error is present).
+  // An expression that answers falsy is a success, so a broken expression is
+  // never mistaken for a false one.
+  bool success = 5;
+  optional CommandError error = 6;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -831,6 +865,10 @@ message WaitForAnyRequestRequest {
 message WaitForAnyRequestResponse {
   int32 index = 1;
   InterceptedRequest request = 2;
+  // False iff the command refused; then error carries the code. See the
+  // protocol definition for which codes this command can return.
+  bool success = 3;
+  optional CommandError error = 4;
 }
 
 message WaitForAnyResponseRequest {
@@ -845,6 +883,10 @@ message WaitForAnyResponseRequest {
 message WaitForAnyResponseResponse {
   int32 index = 1;
   InterceptedResponse response = 2;
+  // False iff the command refused; then error carries the code. See the
+  // protocol definition for which codes this command can return.
+  bool success = 3;
+  optional CommandError error = 4;
 }
 
 message ModifyRequestRequest {
@@ -859,6 +901,10 @@ message ModifyRequestRequest {
 
 message ModifyRequestResponse {
   InterceptedRequest request = 1;
+  // False iff the command refused; then error carries the code. See the
+  // protocol definition for which codes this command can return.
+  bool success = 2;
+  optional CommandError error = 3;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -892,6 +938,11 @@ message StopNetworkCaptureRequest {
 message StopNetworkCaptureResponse {
   // False if no capture was running for this session.
   bool stopped = 1;
+  // Always true today: this command has no semantic failure of its own. Both
+  // fields are carried so every response answers the same question the same
+  // way, and so a future failure mode is an added code, not a new shape.
+  bool success = 2;
+  optional CommandError error = 3;
 }
 
 message StreamNetworkExchangesRequest {
@@ -973,6 +1024,11 @@ message GetCookiesRequest {
 
 message GetCookiesResponse {
   repeated CookieParam cookies = 1;
+  // Always true today: this command has no semantic failure of its own. Both
+  // fields are carried so every response answers the same question the same
+  // way, and so a future failure mode is an added code, not a new shape.
+  bool success = 2;
+  optional CommandError error = 3;
 }
 
 message SetCookiesRequest {
@@ -1015,6 +1071,11 @@ message GetStorageRequest {
 message GetStorageResponse {
   // localStorage entries grouped by origin.
   repeated StorageOriginEntry storage = 1;
+  // Always true today: this command has no semantic failure of its own. Both
+  // fields are carried so every response answers the same question the same
+  // way, and so a future failure mode is an added code, not a new shape.
+  bool success = 2;
+  optional CommandError error = 3;
 }
 
 message SetStorageRequest {
@@ -1076,6 +1137,11 @@ message GetAuthSessionRequest {
 message GetAuthSessionResponse {
   // Present only if the context has exportable auth/DBSC state.
   optional AuthSession session = 1;
+  // Always true today: this command has no semantic failure of its own. Both
+  // fields are carried so every response answers the same question the same
+  // way, and so a future failure mode is an added code, not a new shape.
+  bool success = 2;
+  optional CommandError error = 3;
 }
 
 message SetAuthSessionRequest {
@@ -1101,6 +1167,11 @@ message GetDOMRequest {
 message GetDOMResponse {
   // JSON string in CDP DOM.Node shape (root is the Document node).
   string dom = 1;
+  // Always true today: this command has no semantic failure of its own. Both
+  // fields are carried so every response answers the same question the same
+  // way, and so a future failure mode is an added code, not a new shape.
+  bool success = 2;
+  optional CommandError error = 3;
 }
 
 message GetObservationRequest {
@@ -1146,6 +1217,10 @@ message GetObservationResponse {
   // together. The format parameter selects one instead.
   reserved 2;
   reserved "observation_json";
+  // False iff the command refused; then error carries the code. See the
+  // protocol definition for which codes this command can return.
+  bool success = 3;
+  optional CommandError error = 4;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1197,6 +1272,10 @@ message StartDomMirrorResponse {
   uint64 seq = 3;
 
   reserved 4;  // was frames[]; a frame's document is now a child of its owner
+  // False iff the command refused; then error carries the code. See the
+  // protocol definition for which codes this command can return.
+  bool success = 5;
+  optional CommandError error = 6;
 }
 
 message StopDomMirrorRequest {
@@ -1224,6 +1303,10 @@ message GetDomChildrenResponse {
   string children = 1;
   // Page sequence this payload is valid as of.
   uint64 seq = 2;
+  // False iff the command refused; then error carries the code. See the
+  // protocol definition for which codes this command can return.
+  bool success = 3;
+  optional CommandError error = 4;
 }
 
 message ReleaseDomSubtreeRequest {
@@ -1248,6 +1331,10 @@ message RevealDomNodeResponse {
   string path = 1;
   // Page sequence this payload is valid as of.
   uint64 seq = 2;
+  // False iff the command refused; then error carries the code. See the
+  // protocol definition for which codes this command can return.
+  bool success = 3;
+  optional CommandError error = 4;
 }
 
 message GetDomRevisionRequest {
@@ -1259,6 +1346,11 @@ message GetDomRevisionRequest {
 message GetDomRevisionResponse {
   // Monotonic counter, meaningful only within the current document.
   uint64 revision = 1;
+  // Always true today: this command has no semantic failure of its own. Both
+  // fields are carried so every response answers the same question the same
+  // way, and so a future failure mode is an added code, not a new shape.
+  bool success = 2;
+  optional CommandError error = 3;
 }
 
 message StreamDomEventsRequest {
@@ -1337,6 +1429,11 @@ message InspectAtPositionResponse {
   string text_content = 4;
   bool is_visible = 5;
   Rect bounds = 6;
+  // Always true today: this command has no semantic failure of its own. Both
+  // fields are carried so every response answers the same question the same
+  // way, and so a future failure mode is an added code, not a new shape.
+  bool success = 7;
+  optional CommandError error = 8;
 }
 
 message HighlightNodeRequest {
@@ -1411,6 +1508,11 @@ message GetSelectionRequest {
 message GetSelectionResponse {
   // Empty if nothing is selected on the page.
   string text = 1;
+  // Always true today: this command has no semantic failure of its own. Both
+  // fields are carried so every response answers the same question the same
+  // way, and so a future failure mode is an added code, not a new shape.
+  bool success = 2;
+  optional CommandError error = 3;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1438,6 +1540,10 @@ message ScreenshotResponse {
   int32 width = 2;
   // Image height in physical pixels.
   int32 height = 3;
+  // False iff the command refused; then error carries the code. See the
+  // protocol definition for which codes this command can return.
+  bool success = 4;
+  optional CommandError error = 5;
 }
 
 // ReadCanvas reads the pixels of a <canvas> directly in the renderer, bypassing
@@ -1483,6 +1589,8 @@ message ReadCanvasResponse {
   int32 height = 6;
   // Whether the canvas was actually origin-clean. Informational only.
   bool origin_clean = 7;
+  // Present iff success is false: "not_found", "not_element" or "not_readable".
+  optional CommandError error = 8;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1547,14 +1655,16 @@ message StartStreamResponse {
   // races the stream. x/y are always 0. Later changes arrive as
   // {"type":"viewport","width":W,"height":H} on the reliable "input" channel.
   Rect viewport = 2;
+  // False iff the command refused; then error carries the code. See the
+  // protocol definition for which codes this command can return.
+  bool success = 3;
+  optional CommandError error = 4;
 }
 
 message StopStreamRequest {
   string session_id = 1;
   string api_key = 2;
 }
-
-message StopStreamResponse {}
 
 // ──────────────────────────────────────────────────────────────────────
 // Scripts

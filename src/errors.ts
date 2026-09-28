@@ -37,6 +37,57 @@ export class BrowserScaleError extends Error {
 }
 
 /**
+ * CommandError is thrown when the browser carried out a command correctly but
+ * the page would not go along with it. It is the error for the commands that
+ * have nothing to report beyond what went wrong; the richer failures have their
+ * own class ({@link ClickError}, {@link FillError}, {@link DragError}) carrying
+ * the same `code` plus their own detail.
+ *
+ * It never reports an outage. A dead session, a closed page or a malformed call
+ * arrive as a plain {@link BrowserScaleError} instead, so narrowing to this
+ * class tells you the fault is in the page or in what you asked of it — which is
+ * the difference between retrying and fixing your code.
+ *
+ *   try {
+ *     await browser.evaluate("window.__ready === true");
+ *   } catch (e) {
+ *     if (e instanceof CommandError && e.code === "threw") {
+ *       // the expression itself is broken; e.message has the exception text
+ *     }
+ *   }
+ */
+/**
+ * Raises the optional error of a uniform result, and does nothing when the
+ * command succeeded — so a call site stays one line instead of an if.
+ */
+export function throwCommandError(
+  command: string,
+  error?: { code: string; message: string },
+): void {
+  if (error) {
+    throw new CommandError({ command, code: error.code, message: error.message });
+  }
+}
+
+export class CommandError extends BrowserScaleError {
+  /** The call that failed, e.g. `"evaluate"`. */
+  readonly command: string;
+  /**
+   * Machine-stable and lowercase, and scoped to `command`: the same string can
+   * mean different things for different commands, so narrow on it together with
+   * the call you made.
+   */
+  readonly code: string;
+
+  constructor(init: { command: string; code: string; message: string }) {
+    super(formatMessage(init.command, init.code, init.message));
+    this.name = "CommandError";
+    this.command = init.command;
+    this.code = init.code;
+  }
+}
+
+/**
  * ClickError is thrown by {@link CloudBrowser.click} when the click did not
  * land — the target was found but another element covered the intended point.
  * `occluder` describes the blocker; `result` carries the resolved element and
