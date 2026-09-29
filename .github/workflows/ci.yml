@@ -1,0 +1,72 @@
+# What every change has to pass. The release itself is in release.yml; this is
+# the part that runs before there is a tag to regret.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      # The generated protobuf code is committed, so a proto change without a
+      # regeneration would ship stale types.
+      - name: Generated code is up to date
+        run: git diff --exit-code -- src/gen
+
+      - name: Pack
+        run: npm pack
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: browserscale-ts-*.tgz
+
+  # Installs the packed tarball the way a user would, on every Node version the
+  # package claims to support, and checks that both entry points load.
+  install:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["18", "20", "22", "24"]
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+
+      - name: Install and import
+        run: |
+          set -euo pipefail
+          mkdir smoke && cd smoke
+          npm init -y >/dev/null
+          npm install ../browserscale-ts-*.tgz
+          node --input-type=module -e '
+            const m = await import("browserscale-ts");
+            for (const name of ["rentBrowser", "connectSession", "CloudBrowser", "BrowserConfig", "WaitError"]) {
+              if (!m[name]) throw new Error(`missing export ${name}`);
+            }
+            await import("browserscale-ts/browser");
+            console.log("ok");
+          '
