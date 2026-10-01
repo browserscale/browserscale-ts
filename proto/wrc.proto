@@ -61,10 +61,12 @@ service Browser {
   // Network capture — every matching request in the session, reported as it
   // completes. Start/Stop are session state; the stream is a separate
   // subscription, so a capture survives a reader reconnect and two readers
-  // can watch one capture.
+  // can watch one capture. Exchanges only name their bodies; GetNetworkBody
+  // reads them.
   rpc StartNetworkCapture(StartNetworkCaptureRequest) returns (CommandResult);
   rpc StopNetworkCapture(StopNetworkCaptureRequest) returns (StopNetworkCaptureResponse);
   rpc StreamNetworkExchanges(StreamNetworkExchangesRequest) returns (stream NetworkExchangeEvent);
+  rpc GetNetworkBody(GetNetworkBodyRequest) returns (GetNetworkBodyResponse);
 
   // Cookies
   rpc GetCookies(GetCookiesRequest) returns (GetCookiesResponse);
@@ -961,16 +963,17 @@ message StartNetworkCaptureRequest {
   // URL wildcards to capture; empty captures everything in the session.
   // Prefix an entry with "!" to exclude it.
   repeated string patterns = 3;
-  // Response body capture: "none" (default), "text" or "all".
+  // Response body capture: "none" (default), "text" or "all". Request bodies
+  // are kept whenever a request has one.
   string bodies = 4;
-  // Narrows body capture further; empty applies `bodies` to every captured
-  // exchange.
+  // Narrows response body capture further; empty applies `bodies` to every
+  // captured exchange.
   repeated string body_patterns = 5;
 
   // The per-body and per-session byte caps the browser command also accepts
-  // are deliberately not on the wire: they bound memory on a host shared by
-  // every session on the machine, so one caller must not be able to size
-  // another caller's buffers. Reserved in case that ever changes.
+  // are deliberately not on the wire: bodies are stored on the host, which is
+  // shared by every session on the machine, so the server owns the quota.
+  // Reserved in case that ever changes.
   reserved 6, 7;
 }
 
@@ -1030,9 +1033,13 @@ message NetworkExchange {
   // Cookie, User-Agent, Sec-* and encoding included. False means they are what
   // the renderer asked for, before the network service filled in the rest.
   bool request_headers_are_wire = 11;
-  // Inline request body, capped by the browser. File and streamed uploads are
-  // not included; request_body_truncated is set when anything was left out.
-  bytes request_body = 12;
+  // Bodies never travel with the exchange. Pass the id to GetNetworkBody to
+  // read the bytes; empty when the request had no body.
+  string request_body_id = 28;
+  // Bytes kept for the request body.
+  int64 request_body_size = 29;
+  // True when part of the request body is missing: it hit the per-body cap, or
+  // it was a file or streamed upload, which are not kept.
   bool request_body_truncated = 13;
   // False when the request failed before any response arrived.
   bool has_response = 14;
@@ -1046,15 +1053,48 @@ message NetworkExchange {
   string served_from = 20;
   repeated Header response_headers = 21;
   bool response_headers_are_wire = 22;
-  // Populated only when body capture was requested and applied. Bodies cross
-  // the browser boundary as text, so binary content (bodies="all" on an image)
-  // does not arrive intact.
-  bytes response_body = 23;
+  // Pass to GetNetworkBody to read the response body. Empty when body capture
+  // did not apply to this exchange.
+  string response_body_id = 30;
+  // Bytes kept for the response body, after content decoding.
+  int64 response_body_size = 31;
+  // True when the kept body is shorter than the one the page received: it hit
+  // the per-body cap, the load ended early, or the host's disk fell behind.
   bool response_body_truncated = 24;
-  bool response_body_captured = 25;
   int64 encoded_data_length = 26;
   // Net error name (e.g. "net::ERR_ABORTED"); empty on success.
   string error = 27;
+
+  // Inline bodies, superseded by the ids above.
+  reserved 12, 23, 25;
+  reserved "request_body", "response_body", "response_body_captured";
+}
+
+message GetNetworkBodyRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // request_body_id or response_body_id of an exchange.
+  string body_id = 3;
+  // First byte to read; 0 when unset.
+  optional int64 offset = 4;
+  // Bytes to read. Unset or larger than the per-call limit (2 MiB) reads up to
+  // that limit; larger bodies are read in ranges.
+  optional int64 length = 5;
+}
+
+message GetNetworkBodyResponse {
+  // The bytes read; empty past the end of the body.
+  bytes data = 1;
+  // Bytes kept for this body in total.
+  int64 total_size = 2;
+  // Same as the exchange's truncated flag for this body.
+  bool truncated = 3;
+  // False iff the body cannot be read; then error carries the code:
+  //   "not_found" — no body with this id was kept in this session.
+  //   "evicted" — the body was dropped to stay within the session's quota.
+  //   "unavailable" — the body could not be stored or read back.
+  bool success = 4;
+  optional CommandError error = 5;
 }
 
 // ──────────────────────────────────────────────────────────────────────

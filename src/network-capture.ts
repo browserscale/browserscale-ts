@@ -87,8 +87,8 @@ export class NetworkCapture {
 
   /**
    * How many exchanges the server discarded because this reader fell behind.
-   * Anything above zero means the log has holes: make the handler cheaper,
-   * narrow `patterns`, or stop capturing bodies.
+   * Anything above zero means the log has holes: make the handler cheaper or
+   * narrow `patterns`.
    */
   get dropped(): number {
     return this.droppedCount;

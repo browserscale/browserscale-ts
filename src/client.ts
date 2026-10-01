@@ -60,6 +60,7 @@ import {
   GetDomRevisionRequestSchema,
   StreamDomEventsRequestSchema,
   StreamNetworkExchangesRequestSchema,
+  GetNetworkBodyRequestSchema,
   RunScriptRequestSchema,
   StartScriptRequestSchema,
   StopScriptsRequestSchema,
@@ -77,6 +78,8 @@ import type {
   InterceptedResponse,
   InspectResult,
   NavigateResult,
+  NetworkBody,
+  NetworkBodyRange,
   NetworkCaptureOptions,
   PageInfo,
   ScreenshotResult,
@@ -1506,6 +1509,97 @@ export class CloudBrowser {
     );
     throwCommandError("stopNetworkCapture", resp.error);
     return resp.stopped;
+  }
+
+  /**
+   * Reads a whole captured body: an exchange's `requestBodyId` or
+   * `responseBodyId`.
+   *
+   * Bodies are stored by the browser, not sent with the exchange, so reading
+   * one is a separate call. They stay readable after the capture stops, until
+   * the session ends.
+   *
+   * The body is fetched in ranges and assembled in memory. For very large
+   * bodies, use {@link CloudBrowser.readNetworkBodyRange} to process them piece
+   * by piece.
+   *
+   * @param bodyId - `requestBodyId` or `responseBodyId` from a NetworkExchange
+   *
+   * @returns the body and whether the kept body is shorter than the original
+   *
+   * @throws not_found - no body with this id was kept in this session
+   * @throws evicted - the body was dropped to stay within the session's storage
+   *   quota; read bodies sooner, or narrow bodyPatterns
+   * @throws unavailable - the body could not be stored or read back
+   *
+   * @example
+   * const capture = await browser.captureNetwork(
+   *   { patterns: ["*\/api/*"], bodies: "text" },
+   *   (ex) => {
+   *     if (!ex.responseBodyId) return;
+   *     void browser.readNetworkBody(ex.responseBodyId).then(({ data }) =>
+   *       console.log(ex.url, new TextDecoder().decode(data)),
+   *     );
+   *   },
+   * );
+   */
+  async readNetworkBody(bodyId: string): Promise<NetworkBody> {
+    const parts: Uint8Array[] = [];
+    let offset = 0;
+    for (;;) {
+      const r = await this.readNetworkBodyRange(bodyId, offset);
+      parts.push(r.data);
+      offset += r.data.length;
+      if (r.data.length === 0 || offset >= r.totalSize) {
+        if (parts.length === 1) return { data: r.data, truncated: r.truncated };
+        const data = new Uint8Array(offset);
+        let at = 0;
+        for (const p of parts) {
+          data.set(p, at);
+          at += p.length;
+        }
+        return { data, truncated: r.truncated };
+      }
+    }
+  }
+
+  /**
+   * Reads up to `length` bytes of a captured body starting at `offset`.
+   *
+   * A single call returns at most 2 MiB; omit `length` to read that much. Loop
+   * on `offset + data.length` until it reaches `totalSize` to stream a large
+   * body.
+   *
+   * @param bodyId - `requestBodyId` or `responseBodyId` from a NetworkExchange
+   * @param offset - first byte to read (default 0)
+   * @param length - bytes to read (default and maximum 2 MiB)
+   *
+   * @returns NetworkBodyRange with the bytes and the body's total size
+   *
+   * @inheritDoc CloudBrowser.readNetworkBody
+   */
+  async readNetworkBodyRange(
+    bodyId: string,
+    offset?: number,
+    length?: number,
+  ): Promise<NetworkBodyRange> {
+    if (!bodyId) {
+      throw new BrowserScaleError("browserscale.readNetworkBody: bodyId must not be empty");
+    }
+    const req = create(GetNetworkBodyRequestSchema, {
+      sessionId: this.sessionId,
+      apiKey: this.apiKey,
+      bodyId,
+    });
+    if (offset && offset > 0) req.offset = BigInt(Math.floor(offset));
+    if (length && length > 0) req.length = BigInt(Math.floor(length));
+    const resp = await this.client.getNetworkBody(req);
+    throwCommandError("getNetworkBody", resp.error);
+    return {
+      data: resp.data,
+      totalSize: Number(resp.totalSize),
+      truncated: resp.truncated,
+    };
   }
 
   /**

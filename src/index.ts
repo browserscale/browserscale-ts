@@ -44,6 +44,8 @@ export type {
   NetworkResourceType,
   NetworkServedFrom,
   NetworkBodies,
+  NetworkBody,
+  NetworkBodyRange,
   NetworkCaptureOptions,
   WaitResult,
   WaitConditionStatus,

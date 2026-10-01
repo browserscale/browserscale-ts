@@ -175,10 +175,16 @@ export interface NetworkExchange {
    */
   requestHeadersAreWire: boolean;
   /**
-   * Inline body only. File and streamed uploads set requestBodyTruncated
-   * instead of appearing here.
+   * Names the request body; read it with {@link CloudBrowser.readNetworkBody}.
+   * Empty when the request had no body. Bodies never travel with the exchange.
    */
-  requestBody: Uint8Array;
+  requestBodyId: string;
+  /** Bytes kept for the request body. */
+  requestBodySize: number;
+  /**
+   * Part of the request body is missing: it hit the per-body cap, or it was a
+   * file or streamed upload, which are not kept.
+   */
   requestBodyTruncated: boolean;
 
   /** False when the request failed before any response arrived; see error. */
@@ -193,14 +199,18 @@ export interface NetworkExchange {
   responseHeaders: Header[];
   responseHeadersAreWire: boolean;
   /**
-   * Populated only when body capture was requested for this URL and applied;
-   * check responseBodyCaptured to tell an empty body from an uncaptured one.
-   * Binary content does not survive the browser boundary intact — see
+   * Names the response body; read it with {@link CloudBrowser.readNetworkBody}.
+   * Empty when body capture did not apply to this exchange — see
    * {@link NetworkCaptureOptions.bodies}.
    */
-  responseBody: Uint8Array;
+  responseBodyId: string;
+  /** Bytes kept for the response body, after content decoding. */
+  responseBodySize: number;
+  /**
+   * The kept body is shorter than the one the page received: it hit the
+   * per-body cap or the load ended early.
+   */
   responseBodyTruncated: boolean;
-  responseBodyCaptured: boolean;
 
   /** Bytes on the wire, not body size; 0 for a response served from cache. */
   encodedDataLength: number;
@@ -209,14 +219,35 @@ export interface NetworkExchange {
   error: string;
 }
 
-/** How much of a response body a network capture keeps. */
+/** One range of a captured body, from {@link CloudBrowser.readNetworkBodyRange}. */
+export interface NetworkBodyRange {
+  /** The bytes read; empty past the end of the body. */
+  data: Uint8Array;
+  /** Bytes kept for the body as a whole. */
+  totalSize: number;
+  /** Matches the exchange's truncated flag for this body. */
+  truncated: boolean;
+}
+
+/** A whole captured body, from {@link CloudBrowser.readNetworkBody}. */
+export interface NetworkBody {
+  data: Uint8Array;
+  /** The kept body is shorter than the original; see the exchange's flag. */
+  truncated: boolean;
+}
+
+/**
+ * Which response bodies a network capture keeps. Kept bodies are not part of
+ * the exchange; read them with {@link CloudBrowser.readNetworkBody}.
+ */
 export type NetworkBodies = "none" | "text" | "all";
 
 /**
  * Configures {@link CloudBrowser.captureNetwork}.
  *
- * There is deliberately no byte-cap option: buffer sizes bound memory on a
- * machine shared with other sessions, so the server owns them.
+ * There is deliberately no byte-cap option: kept bodies are stored on a
+ * machine shared with other sessions, so the server owns the quota. When a
+ * session's bodies exceed it, the oldest are dropped first.
  */
 export interface NetworkCaptureOptions {
   /**
@@ -227,9 +258,8 @@ export interface NetworkCaptureOptions {
   patterns?: string[];
   /**
    * Response-body capture. `"text"` keeps bodies whose MIME type is textual,
-   * `"all"` keeps every body — but binary payloads (images, fonts, video) do
-   * not cross the browser boundary intact, so prefer `"text"` unless you know
-   * the bodies are textual. Defaults to `"none"`, headers and status only.
+   * `"all"` keeps every body, binary included. Defaults to `"none"`, headers
+   * and status only. Request bodies are kept whenever a request has one.
    */
   bodies?: NetworkBodies;
   /**

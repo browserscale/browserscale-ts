@@ -430,7 +430,8 @@ export function networkExchangeFromProto(e: ProtoNetworkExchange): NetworkExchan
     initiatorUrl: e.initiatorUrl,
     requestHeaders: e.requestHeaders.map(headerFromProto),
     requestHeadersAreWire: e.requestHeadersAreWire,
-    requestBody: e.requestBody,
+    requestBodyId: e.requestBodyId,
+    requestBodySize: Number(e.requestBodySize),
     requestBodyTruncated: e.requestBodyTruncated,
 
     hasResponse: e.hasResponse,
@@ -442,9 +443,9 @@ export function networkExchangeFromProto(e: ProtoNetworkExchange): NetworkExchan
     servedFrom: e.servedFrom,
     responseHeaders: e.responseHeaders.map(headerFromProto),
     responseHeadersAreWire: e.responseHeadersAreWire,
-    responseBody: e.responseBody,
+    responseBodyId: e.responseBodyId,
+    responseBodySize: Number(e.responseBodySize),
     responseBodyTruncated: e.responseBodyTruncated,
-    responseBodyCaptured: e.responseBodyCaptured,
 
     encodedDataLength: Number(e.encodedDataLength),
 
