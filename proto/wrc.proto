@@ -679,6 +679,15 @@ message SessionUsage {
   // Child frames created in the session's pages, whether or not they got a
   // process of their own.
   int32 frames_created = 7;
+  // Bytes the session's pages, workers and service workers received over the
+  // network: HTTP responses with their headers, as transferred (before
+  // decompression), and WebSocket messages. Responses served from the
+  // browser's cache count nothing. A download in progress is counted while it
+  // runs, at most about a second behind.
+  double bytes_received = 8;
+  // Bytes they sent the same way: HTTP requests with headers and bodies, and
+  // WebSocket messages.
+  double bytes_sent = 9;
 }
 
 message GetUsageRequest {

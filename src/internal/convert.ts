@@ -353,6 +353,8 @@ export function sessionUsageFromProto(u: ProtoSessionUsage): SessionUsage {
     peakMemory: u.peakMemory,
     renderersUsed: u.renderersUsed,
     framesCreated: u.framesCreated,
+    bytesReceived: u.bytesReceived,
+    bytesSent: u.bytesSent,
   };
 }
 
@@ -369,6 +371,8 @@ export function sessionUsageFromJson(v: unknown): SessionUsage | undefined {
     peakMemory: num(u.peakMemory),
     renderersUsed: num(u.renderersUsed),
     framesCreated: num(u.framesCreated),
+    bytesReceived: num(u.bytesReceived),
+    bytesSent: num(u.bytesSent),
   };
 }
 

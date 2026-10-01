@@ -71,6 +71,19 @@ export interface SessionUsage {
   renderersUsed: number;
   /** Child frames created in the session's pages, whether or not they got a process of their own. */
   framesCreated: number;
+  /**
+   * Bytes the session's pages, workers and service workers received over the
+   * network: HTTP responses with their headers, as transferred (before
+   * decompression), and WebSocket messages. Responses served from the
+   * browser's cache count nothing. A download in progress is counted while it
+   * runs, at most about a second behind.
+   */
+  bytesReceived: number;
+  /**
+   * Bytes they sent the same way: HTTP requests with headers and bodies, and
+   * WebSocket messages.
+   */
+  bytesSent: number;
 }
 
 /** Header is a single HTTP header (name/value pair) on an intercepted request or response. */
