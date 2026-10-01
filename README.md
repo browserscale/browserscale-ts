@@ -91,7 +91,8 @@ Browser automation that doesn't guess. Waits, clicks and frames are handled insi
   service worker passes through it. No attach race, nothing slips.
 - **Capture that never pauses the page** — `captureNetwork` streams every
   finished request with the headers and cookies actually put on the wire, each
-  redirect hop as its own exchange, bodies copied off to the side.
+  redirect hop as its own exchange. Bodies stay with the browser, byte for
+  byte, and you pull only the ones you want with `readNetworkBody`.
 - **Catch one call and change it** — wait for a request or response, block,
   mock, rewrite headers or bodies, or answer a whole navigation yourself with
   `loadHTML`.
@@ -211,7 +212,8 @@ reports the element that occluded the click.
 | `browser.evaluate(expr)` | Run JS in the page/frame and get a typed value back. |
 | `browser.runScript(source)` | Run JavaScript beside the browser, where cross-origin frames are property access and every step is local; `startScript` leaves it running, `followScript` watches one already going. |
 | `browser.getObservation(opts?)` | Compact, node-handle-tagged view of the visible page across frames; `opts` tunes budgets and format. |
-| `browser.captureNetwork(opts, onExchange)` | Stream every request the session completes, optionally with response bodies. |
+| `browser.captureNetwork(opts, onExchange)` | Stream every request the session completes; exchanges carry body ids, not bodies. |
+| `browser.readNetworkBody(bodyId)` / `readNetworkBodyRange(...)` | Read a captured request or response body, whole or a slice at a time. |
 | `browser.mirrorDom(opts, onChange, onResync?)` | Live, incrementally updated copy of the page's DOM across every frame. |
 | `browser.solveCaptcha(opts?)` | Solve an interactive challenge in the live browser. |
 | `browser.getUsage()` | CPU time, memory (min / average / peak), renderers and frames the session has used so far. |
