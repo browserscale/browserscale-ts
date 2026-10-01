@@ -6,6 +6,7 @@ import {
   // request / response schemas
   SetProxyRequestSchema,
   GetPagesRequestSchema,
+  GetUsageRequestSchema,
   NavigateRequestSchema,
   LoadHTMLRequestSchema,
   EvaluateRequestSchema,
@@ -81,6 +82,7 @@ import type {
   ScreenshotResult,
   ReadCanvasResult,
   SelectOptionResult,
+  SessionUsage,
   WaitResult,
   IceServer,
   StreamAnswer,
@@ -131,6 +133,7 @@ import {
   interceptedResponseFromProto,
   pageInfoFromProto,
   rectFromProto,
+  sessionUsageFromProto,
   splitRequestPatterns,
   storageEntriesToProto,
   storageEntryFromProto,
@@ -160,14 +163,14 @@ export class CloudBrowser {
   private readonly apiKey: string;
   private readonly _transport: Transport;
   private readonly _fingerprint: string;
-  private readonly _stopFn?: () => Promise<void>;
+  private readonly _stopFn?: () => Promise<SessionUsage | undefined>;
 
   constructor(
     transport: Transport,
     sessionId: string,
     apiKey: string,
     fingerprint: string,
-    stopFn?: () => Promise<void>,
+    stopFn?: () => Promise<SessionUsage | undefined>,
   ) {
     this._transport = transport;
     this.sessionId = sessionId;
@@ -204,16 +207,25 @@ export class CloudBrowser {
    * {@link createWebSocketBrowser} the rental stays untouched; only the
    * transport is closed.
    *
+   * @returns SessionUsage what the session consumed over its whole life, read
+   *   as it was torn down - no {@link CloudBrowser.getUsage} call is needed
+   *   before stopping. Undefined when the server could not report it, and for
+   *   a handle that owns no rental.
+   *
    * Rejects only when the stop API or the transport close fails. The session is
    * released either way; retrying a stop is safe.
    *
    * @example
-   * await browser.stopBrowser();
+   * const usage = await browser.stopBrowser();
+   * if (usage) {
+   *   console.log(`ran ${usage.wallTime}s, ${usage.cpuTime}s CPU, peak ${usage.peakMemory} bytes`);
+   * }
    */
-  async stopBrowser(): Promise<void> {
+  async stopBrowser(): Promise<SessionUsage | undefined> {
     if (this._stopFn) {
-      await this._stopFn();
+      return await this._stopFn();
     }
+    return undefined;
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -286,6 +298,40 @@ export class CloudBrowser {
     );
     throwCommandError("getPages", resp.error);
     return resp.pages.map(pageInfoFromProto);
+  }
+
+  /**
+   * Reports what this session's browser has consumed so far.
+   *
+   * Everything but minMemory and averageMemory only ever grows, so polling and
+   * diffing two readings gives the cost of what ran in between. The final
+   * figures need no call of their own: {@link CloudBrowser.stopBrowser} resolves
+   * with them.
+   *
+   * @returns SessionUsage as of now
+   *
+   * Rejects only on a transport failure - a dead session, a broken connection.
+   * This call has no semantic failure of its own, so there are no error codes to
+   * branch on.
+   *
+   * @example
+   * const before = await browser.getUsage();
+   * await browser.navigate("https://example.com");
+   * const after = await browser.getUsage();
+   * console.log(`navigation cost ${after.cpuTime - before.cpuTime}s of CPU`);
+   */
+  async getUsage(): Promise<SessionUsage> {
+    const resp = await this.client.getUsage(
+      create(GetUsageRequestSchema, {
+        sessionId: this.sessionId,
+        apiKey: this.apiKey,
+      }),
+    );
+    throwCommandError("getUsage", resp.error);
+    if (!resp.usage) {
+      throw new BrowserScaleError("getUsage: the server sent no usage");
+    }
+    return sessionUsageFromProto(resp.usage);
   }
 
   // ──────────────────────────────────────────────────────────────────

@@ -1,7 +1,8 @@
 import { createGrpcTransport } from "@connectrpc/connect-node";
 import { CloudBrowser } from "./client.ts";
 import { BrowserConfig } from "./config.ts";
-import type { BrowserInfo, RentResponse } from "./types.ts";
+import type { BrowserInfo, RentResponse, SessionUsage } from "./types.ts";
+import { sessionUsageFromJson } from "./internal/convert.ts";
 
 // Public API ──────────────────────────────────────────────────────────
 
@@ -59,6 +60,7 @@ export type {
   InspectResult,
   RentResponse,
   BrowserInfo,
+  SessionUsage,
   IceServer,
   StreamAnswer,
   ReactionInfo,
@@ -174,9 +176,9 @@ export async function rentBrowser(config: BrowserConfig): Promise<CloudBrowser> 
     baseUrl: grpcBaseUrl(rentResp.grpcUrl),
   });
 
-  return new CloudBrowser(transport, rentResp.sessionId, config.apiKey, rentResp.fingerprint, async () => {
-    await callStopApi(config.apiKey, rentResp.sessionId);
-  });
+  return new CloudBrowser(transport, rentResp.sessionId, config.apiKey, rentResp.fingerprint, () =>
+    callStopApi(config.apiKey, rentResp.sessionId),
+  );
 }
 
 /**
@@ -208,9 +210,9 @@ export function connectSession(
   sessionId: string,
 ): CloudBrowser {
   const transport = createGrpcTransport({ baseUrl: grpcBaseUrl(grpcUrl) });
-  return new CloudBrowser(transport, sessionId, apiKey, "", async () => {
-    await callStopApi(apiKey, sessionId);
-  });
+  return new CloudBrowser(transport, sessionId, apiKey, "", () =>
+    callStopApi(apiKey, sessionId),
+  );
 }
 
 /**
@@ -223,14 +225,20 @@ export function connectSession(
  * @param apiKey - API key the session was rented with
  * @param sessionId - id of the session to release
  *
+ * @returns SessionUsage what the session consumed over its whole life;
+ *   undefined when the server could not report it
+ *
  * Rejects when the stop API refuses the request. Stopping a session that is
  * already gone is a no-op rather than a failure.
  *
  * @example
- * await stopBrowser(apiKey, sessionId);
+ * const usage = await stopBrowser(apiKey, sessionId);
  */
-export async function stopBrowser(apiKey: string, sessionId: string): Promise<void> {
-  await callStopApi(apiKey, sessionId);
+export async function stopBrowser(
+  apiKey: string,
+  sessionId: string,
+): Promise<SessionUsage | undefined> {
+  return await callStopApi(apiKey, sessionId);
 }
 
 /**
@@ -339,7 +347,7 @@ async function callRentApi(config: BrowserConfig): Promise<RentResponse> {
   };
 }
 
-async function callStopApi(apiKey: string, sessionId: string): Promise<void> {
+async function callStopApi(apiKey: string, sessionId: string): Promise<SessionUsage | undefined> {
   const resp = await fetch(`${apiEndpoint}/stop`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -350,4 +358,5 @@ async function callStopApi(apiKey: string, sessionId: string): Promise<void> {
   if (!resp.ok || !data.success) {
     throw new Error(`stop failed: ${data.error ?? resp.statusText}`);
   }
+  return sessionUsageFromJson(data.usage);
 }

@@ -214,7 +214,8 @@ reports the element that occluded the click.
 | `browser.captureNetwork(opts, onExchange)` | Stream every request the session completes, optionally with response bodies. |
 | `browser.mirrorDom(opts, onChange, onResync?)` | Live, incrementally updated copy of the page's DOM across every frame. |
 | `browser.solveCaptcha(opts?)` | Solve an interactive challenge in the live browser. |
-| `browser.stopBrowser()` | Release the rental. |
+| `browser.getUsage()` | CPU time, memory (min / average / peak), renderers and frames the session has used so far. |
+| `browser.stopBrowser()` | Release the rental; resolves with the session's final usage. |
 
 Locators: `css(...)`, `js(...)` (target by page logic when CSS can't). Plus
 cookies, storage, auth/DBSC (`getAuthSession`/`setAuthSession`), network

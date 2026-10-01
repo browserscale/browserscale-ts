@@ -57,6 +57,7 @@ export type {
   InspectResult,
   RentResponse,
   BrowserInfo,
+  SessionUsage,
 } from "./types.ts";
 
 // Option bags

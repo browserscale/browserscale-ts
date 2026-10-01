@@ -22,6 +22,9 @@ service Browser {
   // Context-level
   rpc SetProxy(SetProxyRequest) returns (CommandResult);
   rpc GetPages(GetPagesRequest) returns (GetPagesResponse);
+  // What the session has consumed so far. The final figures need no call of
+  // their own: the stop endpoint returns them.
+  rpc GetUsage(GetUsageRequest) returns (GetUsageResponse);
 
   // Page navigation / content
   rpc Navigate(NavigateRequest) returns (NavigateResponse);
@@ -643,6 +646,47 @@ message GetPagesResponse {
   // Always true today: this command has no semantic failure of its own. Both
   // fields are carried so every response answers the same question the same
   // way, and so a future failure mode is an added code, not a new shape.
+  bool success = 2;
+  optional CommandError error = 3;
+}
+
+// What a session's browser has consumed since the session started: the CPU
+// time and memory of every process that rendered its pages — main frames,
+// cross-site iframes and the workers they host — including processes that have
+// since exited. Work done on the session's behalf in processes it shares with
+// other sessions is not included. The stop endpoint returns the same object, in
+// its JSON form, as the session's final usage.
+message SessionUsage {
+  // Real time since the session's browser was created, in seconds.
+  double wall_time = 1;
+  // CPU time in seconds, user plus kernel. Only time a thread actually ran on a
+  // core counts; waiting and idling do not.
+  double cpu_time = 2;
+  // The least memory the session held once its browser was ready, in bytes.
+  // Sampled about once a second.
+  double min_memory = 3;
+  // The memory held, averaged over wall_time, in bytes; average_memory *
+  // wall_time is the memory-time used. Sampled about once a second, so short
+  // spikes count toward the peak but barely toward the average.
+  double average_memory = 4;
+  // The most memory held at any one moment, in bytes.
+  double peak_memory = 5;
+  // Renderer processes that hosted at least one of the session's frames: one
+  // per site its pages and cross-site iframes needed.
+  int32 renderers_used = 6;
+  // Child frames created in the session's pages, whether or not they got a
+  // process of their own.
+  int32 frames_created = 7;
+}
+
+message GetUsageRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+message GetUsageResponse {
+  SessionUsage usage = 1;
+  // Always true today: this command has no semantic failure of its own.
   bool success = 2;
   optional CommandError error = 3;
 }

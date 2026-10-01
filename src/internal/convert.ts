@@ -17,6 +17,7 @@ import {
   type WaitConditionStatus as ProtoWaitConditionStatus,
   type FrameInfo as ProtoFrameInfo,
   type PageInfo as ProtoPageInfo,
+  type SessionUsage as ProtoSessionUsage,
   type Header as ProtoHeader,
   type InterceptedRequest as ProtoInterceptedRequest,
   type InterceptedResponse as ProtoInterceptedResponse,
@@ -47,6 +48,7 @@ import type {
   PageInfo,
   Rect,
   SelectOptionResult,
+  SessionUsage,
   WaitConditionStatus,
   WaitResult,
 } from "../types.ts";
@@ -339,6 +341,34 @@ export function pageInfoFromProto(p: ProtoPageInfo): PageInfo {
     frameTree: p.frameTree
       ? frameInfoFromProto(p.frameTree)
       : ({} as FrameInfo),
+  };
+}
+
+export function sessionUsageFromProto(u: ProtoSessionUsage): SessionUsage {
+  return {
+    wallTime: u.wallTime,
+    cpuTime: u.cpuTime,
+    minMemory: u.minMemory,
+    averageMemory: u.averageMemory,
+    peakMemory: u.peakMemory,
+    renderersUsed: u.renderersUsed,
+    framesCreated: u.framesCreated,
+  };
+}
+
+// The stop endpoint answers in JSON, with the same field names as SessionUsage.
+export function sessionUsageFromJson(v: unknown): SessionUsage | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const u = v as Record<string, unknown>;
+  const num = (x: unknown) => (typeof x === "number" ? x : 0);
+  return {
+    wallTime: num(u.wallTime),
+    cpuTime: num(u.cpuTime),
+    minMemory: num(u.minMemory),
+    averageMemory: num(u.averageMemory),
+    peakMemory: num(u.peakMemory),
+    renderersUsed: num(u.renderersUsed),
+    framesCreated: num(u.framesCreated),
   };
 }
 
