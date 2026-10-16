@@ -1,6 +1,8 @@
 // Plain user-facing types. These mirror browserscale-go/types.go field-for-field;
 // only naming convention differs (camelCase here, PascalCase in Go).
 
+import type { Page } from "./page.ts";
+
 /** Rect describes a position and size in CSS pixels. */
 export interface Rect {
   x: number;
@@ -22,14 +24,38 @@ export interface FrameInfo {
   children: FrameInfo[];
 }
 
-/** PageInfo describes an open page (tab or popup) inside a browser context. */
+/**
+ * PageInfo describes an open page (tab or popup) inside a browser context, as
+ * {@link CloudBrowser.pages} found it.
+ */
 export interface PageInfo {
-  pageId: string;
+  /** The handle to act on the page. */
+  page: Page;
   browserContextId: string;
   url: string;
   title: string;
   viewport: Rect;
   frameTree: FrameInfo;
+  /**
+   * Whether this is the page that has the focus; exactly one page has it. See
+   * {@link CloudBrowser.focusedPage}.
+   */
+  isFocused: boolean;
+  /**
+   * Whether the page is a popup window (window.open with window features)
+   * rather than a tab.
+   */
+  isPopup: boolean;
+  /**
+   * The page that opened this one, if it is still open. Also set for
+   * rel=noopener, since the page still came from it.
+   */
+  opener?: Page;
+  /**
+   * The frame that opened this page, which may be a frame of `opener` other
+   * than its main frame.
+   */
+  openerFrameId?: string;
 }
 
 /**
@@ -93,8 +119,8 @@ export interface Header {
 }
 
 /**
- * InterceptedRequest describes an outgoing request captured by
- * {@link CloudBrowser.waitForAnyRequest}.
+ * InterceptedRequest describes an outgoing request captured by a
+ * {@link request} wait condition or {@link CloudBrowser.waitForAnyRequest}.
  */
 export interface InterceptedRequest {
   method: string;
@@ -105,8 +131,8 @@ export interface InterceptedRequest {
 }
 
 /**
- * InterceptedResponse describes a network response captured by
- * {@link CloudBrowser.waitForAnyResponse}.
+ * InterceptedResponse describes a network response captured by a
+ * {@link response} wait condition or {@link CloudBrowser.waitForAnyResponse}.
  */
 export interface InterceptedResponse {
   url: string;
@@ -284,20 +310,69 @@ export interface NetworkCaptureOptions {
 }
 
 /**
- * WaitResult is the outcome of a {@link CloudBrowser.wait} /
- * {@link CloudBrowser.waitForAny} call: which condition matched (index, in
- * argument order) and where the matched element lives.
+ * WaitResult is the outcome of a {@link Page.wait} / {@link Page.waitAny}
+ * call: which condition matched (`index`, in argument order), what `kind` it
+ * was, and what it matched. Narrow on `kind` to reach the payload:
+ *
+ *   const r = await page.waitAny([css("#done"), response("*\/api/token*")]);
+ *   if (r.kind === "response") console.log(r.response.body);
+ *
+ * A timeout does not resolve: it throws {@link WaitError}.
  */
-export interface WaitResult {
-  /**
-   * False iff nothing matched before the deadline. Redundant with `index` being
-   * -1, and carried so every command answers the same question the same way.
-   */
-  success: boolean;
+export type WaitResult =
+  | WaitElementResult
+  | WaitCaptchaResult
+  | WaitRequestResult
+  | WaitResponseResult;
+
+/** The `kind` of a {@link WaitResult}. */
+export type WaitKind = WaitResult["kind"];
+
+interface WaitResultBase {
+  /** Always true on a resolved wait; carried so every command reads the same way. */
+  success: true;
+  /** Index of the matched condition, in argument order. */
   index: number;
+}
+
+/** A {@link css} or {@link js} condition matched. */
+export interface WaitElementResult extends WaitResultBase {
+  kind: "element";
+  element: WaitElement;
+}
+
+/**
+ * A {@link captcha} condition matched. It carries no payload — solve it with
+ * {@link Page.solveCaptcha}.
+ */
+export interface WaitCaptchaResult extends WaitResultBase {
+  kind: "captcha";
+}
+
+/** A {@link request} condition matched. */
+export interface WaitRequestResult extends WaitResultBase {
+  kind: "request";
+  request: InterceptedRequest;
+}
+
+/** A {@link response} condition matched. */
+export interface WaitResponseResult extends WaitResultBase {
+  kind: "response";
+  response: InterceptedResponse;
+}
+
+/** The element a {@link css} or {@link js} wait condition matched. */
+export interface WaitElement {
+  /** The frame the element lives in. */
   frameId: string;
+  /**
+   * Addresses the element in later calls via {@link node}; 0 when a js()
+   * expression matched with a truthy non-Element value.
+   */
   backendNodeId: number;
+  /** Whether the element was visible at the match. */
   isVisible: boolean;
+  /** The element's rect in root-viewport CSS pixels. */
   bounds: Rect;
 }
 
@@ -374,7 +449,7 @@ export interface ElementRef {
 
 /**
  * WaitConditionStatus is the per-condition diagnostic carried by
- * {@link WaitError} when a {@link CloudBrowser.wait} times out: one entry per
+ * {@link WaitError} when a {@link Page.wait} times out: one entry per
  * condition (in the order they were passed) explaining why it never matched.
  */
 export interface WaitConditionStatus {
@@ -382,7 +457,9 @@ export interface WaitConditionStatus {
   index: number;
   /**
    * Last observed state: `"not_found"`, `"found_hidden"`, `"found_occluded"`
-   * (only when the condition required visibility), or `"pending_steady"`.
+   * (only when the condition required visibility), `"pending_steady"`, or
+   * `"not_seen"` for a {@link request} / {@link response} condition that never
+   * saw a matching request.
    */
   state: string;
   /** backendNodeId last seen for this condition (0 if never found). */
@@ -397,7 +474,7 @@ export interface WaitConditionStatus {
   occluder?: OccluderInfo;
 }
 
-/** NavigateResult reports where a {@link CloudBrowser.navigate} call ended up after redirects. */
+/** NavigateResult reports where a {@link Page.navigate} call ended up after redirects. */
 export interface NavigateResult {
   frameId: string;
   url: string;
@@ -430,8 +507,8 @@ export interface EvaluateResult<T = unknown> {
 
 /**
  * ElementResult is the outcome of an element interaction such as
- * {@link CloudBrowser.click}, {@link CloudBrowser.fill} or
- * {@link CloudBrowser.scrollTo}: the resolved element plus the
+ * {@link Page.click}, {@link Page.fill} or
+ * {@link Page.scrollTo}: the resolved element plus the
  * root-relative coordinates the action was performed at.
  */
 export interface ElementResult {
@@ -442,10 +519,16 @@ export interface ElementResult {
   bounds: Rect;
   rootX: number;
   rootY: number;
+  /**
+   * The captcha solves that held a {@link Page.click} or {@link Page.fill}
+   * while it ran, in order (see {@link CloudBrowser.enableCaptchaAutoSolve}).
+   * Absent if none did, and always absent for the other actions.
+   */
+  captchas?: CaptchaInterruption[];
 }
 
 /**
- * DragResult is the outcome of a {@link CloudBrowser.drag} gesture: the
+ * DragResult is the outcome of a {@link Page.dragBy} gesture: the
  * resolved source element and the start/end coordinates of the performed drag.
  */
 export interface DragResult {
@@ -456,6 +539,58 @@ export interface DragResult {
   startY: number;
   endX: number;
   endY: number;
+  /** The captcha solves that held the drag, in order. Absent if none did. */
+  captchas?: CaptchaInterruption[];
+}
+
+/**
+ * A captcha solve that held an action while it ran. Listed under `captchas`
+ * in the action's result.
+ */
+export interface CaptchaInterruption {
+  /** The solve's id, as in the `captchaDetected` / `captchaResolved` events. */
+  solveId: string;
+  /** Whether the challenge was solved. */
+  success: boolean;
+  /** How long the action was held, in milliseconds. */
+  durationMs: number;
+  /**
+   * What the action did after the solve: `"resumed"` (it carried on in the
+   * same document), `"restarted"` (the solve replaced the document, so it
+   * started over), `"continued"` (the solve failed and the action carried on
+   * anyway, see {@link CaptchaAutoSolveOpts.onFailure}) or `"failed"` (the
+   * solve failed and the action ended with code `"captcha_failed"`).
+   */
+  outcome: "resumed" | "restarted" | "continued" | "failed";
+}
+
+/** Settings for {@link CloudBrowser.enableCaptchaAutoSolve}. Omitted fields use the server defaults. */
+export interface CaptchaAutoSolveOpts {
+  /** Budget for one solve, in milliseconds. Default 60000. */
+  solveTimeoutMs?: number;
+  /** Per-solve retry cap, as in {@link Page.solveCaptcha}. Default: the solver's own. */
+  retryAmount?: number;
+  /**
+   * What an action held by a solve does when the solve fails: `"fail"`
+   * (default) ends it with code `"captcha_failed"`, `"continue"` lets it carry
+   * on as if the solve had succeeded.
+   */
+  onFailure?: "fail" | "continue";
+  /**
+   * What happens to a captcha on a page that does not have the focus. Input
+   * only reaches the focused page, so it cannot be solved there as it is:
+   * `"wait"` (default) reports it (state `"waiting_for_focus"`) and solves it
+   * once the page has the focus, `"focus"` brings the page to the front and
+   * solves it right away.
+   */
+  unfocused?: "wait" | "focus";
+  /**
+   * At most this many solves start per page within any 60 seconds. Further
+   * captchas are reported as `"skipped"` and resolved with code
+   * `"limit_reached"`. Protects against a page that keeps putting one up.
+   * Default 5.
+   */
+  maxSolvesPerMinute?: number;
 }
 
 /** SelectOptionResult reports which option a selectByXxx call ended up selecting. */
@@ -467,7 +602,7 @@ export interface SelectOptionResult {
 
 /**
  * ScreenshotResult is a single captured image of the page, returned by
- * {@link CloudBrowser.screenshot}. `dataBase64` holds the encoded image bytes
+ * {@link Page.screenshot}. `dataBase64` holds the encoded image bytes
  * (PNG by default); `width` and `height` are in physical pixels.
  */
 export interface ScreenshotResult {
@@ -478,7 +613,7 @@ export interface ScreenshotResult {
 
 /**
  * ReadCanvasResult is the pixel readback of a <canvas>, returned by
- * {@link CloudBrowser.readCanvas}. `dataBase64` holds the encoded image bytes
+ * {@link Page.readCanvas}. `dataBase64` holds the encoded image bytes
  * (PNG by default) or the raw RGBA buffer when `format` is `"rgba"`.
  * `originClean` reports whether the canvas was untainted (informational — the
  * read succeeds either way).
@@ -495,7 +630,7 @@ export interface ReadCanvasResult {
 
 /**
  * DOMResult is the full-tree DOM snapshot returned by
- * {@link CloudBrowser.getDOM}, plus its sha256[:8] hash for cheap
+ * {@link Page.getDOM}, plus its sha256[:8] hash for cheap
  * change detection.
  */
 export interface DOMResult {
@@ -579,7 +714,7 @@ export interface StreamAnswer {
    * The page's viewport in CSS pixels — the coordinate space its input
    * expects. The video may be displayed at any size, so map your pointer
    * positions into this space before sending them. It comes back with the
-   * answer rather than from a separate {@link CloudBrowser.getPages} so it
+   * answer rather than from a separate {@link CloudBrowser.pages} so it
    * cannot race the stream or describe a different page, and the browser
    * pushes `{"type":"viewport","width":W,"height":H}` on the reliable "input"
    * data channel whenever it changes. Null against an older engine.
@@ -589,11 +724,11 @@ export interface StreamAnswer {
 
 /**
  * ReactionInfo describes a still-pending reaction, as returned by
- * {@link CloudBrowser.listReactions}. One-shot reactions that have already
- * fired are gone and never appear here.
+ * {@link Page.listReactions} and {@link CloudBrowser.listReactions}.
+ * One-shot reactions that have already fired are gone and never appear here.
  */
 export interface ReactionInfo {
-  /** Stable id assigned by {@link CloudBrowser.addReaction} (pass to removeReaction). */
+  /** Stable id assigned by {@link Page.addReaction} (pass to removeReaction). */
   reactionId: string;
   /** Set if the reaction matches by CSS selector. */
   matchSelector: string;
@@ -607,4 +742,9 @@ export interface ReactionInfo {
   frameId: string;
   /** Whether the match additionally requires the element to be visible. */
   visible: boolean;
+  /**
+   * Whether the reaction was registered for every page
+   * ({@link CloudBrowser.addReaction}) rather than for one.
+   */
+  allPages: boolean;
 }

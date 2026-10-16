@@ -2,7 +2,7 @@ import type { DomEvent } from "./gen/wrc_pb.ts";
 
 /**
  * A node in the mirrored page, in CDP's `DOM.Node` shape — the same shape
- * {@link CloudBrowser.getDOM} returns, with two additions that the mirror
+ * {@link Page.getDOM} returns, with two additions that the mirror
  * needs and a caller usually wants anyway: {@link DomNode.frameId} and
  * {@link DomNode.contentFrameId}.
  *
@@ -146,7 +146,7 @@ const RESYNC_RETRY_MS = 150;
 /**
  * A live copy of a page's DOM, across every frame in it.
  *
- * Returned by {@link CloudBrowser.mirrorDom}. The browser sends the top of the
+ * Returned by {@link Page.mirrorDom}. The browser sends the top of the
  * tree once and from then on only what changed in the part you expanded, so a
  * page that churns inside a collapsed subtree costs one number per batch
  * instead of a re-serialized document.
@@ -168,7 +168,7 @@ const RESYNC_RETRY_MS = 150;
  * identity check) skip the parts that did not move.
  *
  * ```ts
- * const mirror = await browser.mirrorDom({ pierce: true }, () => render(mirror.root));
+ * const mirror = await page.mirrorDom({ pierce: true }, () => render(mirror.root));
  * await mirror.expand(bodyNode);   // start reporting changes inside <body>
  * await mirror.collapse(bodyNode); // stop again
  * await mirror.stop();

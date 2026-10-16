@@ -4,6 +4,7 @@
 import { create } from "@bufbuild/protobuf";
 import {
   type Rect as ProtoRect,
+  type CaptchaInterruption as ProtoCaptchaInterruption,
   type ClickResult as ProtoClickResult,
   type FillResult as ProtoFillResult,
   type MoveResult as ProtoMoveResult,
@@ -36,6 +37,7 @@ import {
   DbscSessionSchema,
 } from "../gen/wrc_pb.ts";
 import type {
+  CaptchaInterruption,
   DragResult,
   ElementRef,
   ElementResult,
@@ -53,6 +55,7 @@ import type {
   WaitResult,
 } from "../types.ts";
 import {
+  BrowserScaleError,
   ClickError,
   DragError,
   FillError,
@@ -66,6 +69,7 @@ import type { StorageOriginEntry } from "../storage.ts";
 import type { AuthSession } from "../auth-session.ts";
 import type { HeaderModification, RequestPattern } from "../network.ts";
 import { type Locator, pickFrame } from "../locator.ts";
+import type { Page } from "../page.ts";
 
 // ──────────────────────────────────────────────────────────────────────
 // Element-target fields shared by every action request
@@ -173,6 +177,7 @@ function clickDetailFromProto(e?: ProtoClickError): ClickError | undefined {
     message: e.message,
     occluder: occluderFromProto(e.occluder),
     evadeAttempted: e.evadeAttempted ?? false,
+    focusedPageId: e.focusedPageId,
   });
 }
 
@@ -192,15 +197,30 @@ function elementRefFromProto(e?: ProtoElementRef): ElementRef | undefined {
   };
 }
 
+function captchasFromProto(
+  cs: ProtoCaptchaInterruption[],
+): CaptchaInterruption[] | undefined {
+  if (cs.length === 0) return undefined;
+  return cs.map((c) => ({
+    solveId: c.solveId,
+    success: c.success,
+    durationMs: c.durationMs,
+    outcome: c.outcome as CaptchaInterruption["outcome"],
+  }));
+}
+
 /** Maps a ClickResult to ElementResult; throws {@link ClickError} when the click did not land. */
 export function unwrapClick(r: ProtoClickResult): ElementResult {
   const res = elementResult(r, r.isVisible, rectFromProto(r.bounds), r.rootX, r.rootY);
+  const captchas = captchasFromProto(r.captchas);
+  if (captchas) res.captchas = captchas;
   if (!r.success && r.error) {
     throw new ClickError({
       code: r.error.code,
       message: r.error.message,
       occluder: occluderFromProto(r.error.occluder),
       evadeAttempted: r.error.evadeAttempted ?? false,
+      focusedPageId: r.error.focusedPageId,
       result: res,
     });
   }
@@ -211,6 +231,8 @@ export function unwrapClick(r: ProtoClickResult): ElementResult {
 export function unwrapFill(r: ProtoFillResult): ElementResult {
   // Fill omits is_visible/bounds from its contract; they stay zero.
   const res = elementResult(r, false, rectFromProto(undefined), r.rootX, r.rootY);
+  const captchas = captchasFromProto(r.captchas);
+  if (captchas) res.captchas = captchas;
   if (!r.success && r.error) {
     throw new FillError({
       code: r.error.code,
@@ -230,7 +252,12 @@ export function unwrapFill(r: ProtoFillResult): ElementResult {
 export function unwrapMove(r: ProtoMoveResult): ElementResult {
   const res = elementResult(r, r.isVisible, rectFromProto(r.bounds), r.rootX, r.rootY);
   if (!r.success && r.error) {
-    throw new MoveError({ code: r.error.code, message: r.error.message, result: res });
+    throw new MoveError({
+      code: r.error.code,
+      message: r.error.message,
+      focusedPageId: r.error.focusedPageId,
+      result: res,
+    });
   }
   return res;
 }
@@ -256,6 +283,8 @@ export function unwrapDrag(r: ProtoDragResult): DragResult {
     endX: r.endX,
     endY: r.endY,
   };
+  const captchas = captchasFromProto(r.captchas);
+  if (captchas) res.captchas = captchas;
   if (!r.success && r.error) {
     throw new DragError({
       code: r.error.code,
@@ -294,23 +323,40 @@ function waitConditionStatusFromProto(c: ProtoWaitConditionStatus): WaitConditio
 
 /** Maps a WaitResult; throws {@link WaitError} when no condition matched before the deadline. */
 export function unwrapWait(r: ProtoWaitResult): WaitResult {
-  const res: WaitResult = {
-    success: r.success,
-    index: r.index,
-    frameId: r.frameId,
-    backendNodeId: r.backendNodeId,
-    isVisible: r.isVisible,
-    bounds: rectFromProto(r.bounds),
-  };
   if (r.error) {
     throw new WaitError({
       code: r.error.code,
       message: r.error.message,
       conditions: r.error.conditions.map(waitConditionStatusFromProto),
-      result: res,
     });
   }
-  return res;
+  const base = { success: true as const, index: r.index };
+  switch (r.kind) {
+    case "element":
+      return {
+        ...base,
+        kind: "element",
+        element: {
+          frameId: r.element?.frameId ?? "",
+          backendNodeId: r.element?.backendNodeId ?? 0,
+          isVisible: r.element?.isVisible ?? false,
+          bounds: rectFromProto(r.element?.bounds),
+        },
+      };
+    case "captcha":
+      return { ...base, kind: "captcha" };
+    case "request": {
+      const request = interceptedRequestFromProto(r.request);
+      if (request) return { ...base, kind: "request", request };
+      break;
+    }
+    case "response": {
+      const response = interceptedResponseFromProto(r.response);
+      if (response) return { ...base, kind: "response", response };
+      break;
+    }
+  }
+  throw new BrowserScaleError(`browserscale.wait: unexpected match kind "${r.kind}"`);
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -331,9 +377,9 @@ export function frameInfoFromProto(f: ProtoFrameInfo): FrameInfo {
   };
 }
 
-export function pageInfoFromProto(p: ProtoPageInfo): PageInfo {
+export function pageInfoFromProto(p: ProtoPageInfo, page: (id: string) => Page): PageInfo {
   return {
-    pageId: p.pageId,
+    page: page(p.pageId),
     browserContextId: p.browserContextId,
     url: p.url,
     title: p.title,
@@ -341,6 +387,10 @@ export function pageInfoFromProto(p: ProtoPageInfo): PageInfo {
     frameTree: p.frameTree
       ? frameInfoFromProto(p.frameTree)
       : ({} as FrameInfo),
+    isFocused: p.isFocused,
+    isPopup: p.isPopup,
+    opener: p.openerPageId ? page(p.openerPageId) : undefined,
+    openerFrameId: p.openerFrameId || undefined,
   };
 }
 

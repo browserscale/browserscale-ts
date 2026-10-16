@@ -1,3 +1,5 @@
+import { Code, ConnectError } from "@connectrpc/connect";
+import type { Page } from "./page.ts";
 import type {
   DragResult,
   ElementRef,
@@ -5,7 +7,6 @@ import type {
   OccluderInfo,
   SelectOptionResult,
   WaitConditionStatus,
-  WaitResult,
 } from "./types.ts";
 
 /**
@@ -23,7 +24,7 @@ import type {
  * Catch the base for anything, or narrow to a subclass for the detail:
  *
  *   try {
- *     await browser.click(css("#btn"));
+ *     await page.click(css("#btn"));
  *   } catch (e) {
  *     if (e instanceof ClickError) console.log(e.code, e.occluder?.tagName);
  *     else if (e instanceof BrowserScaleError) { ... }
@@ -49,7 +50,7 @@ export class BrowserScaleError extends Error {
  * the difference between retrying and fixing your code.
  *
  *   try {
- *     await browser.evaluate("window.__ready === true");
+ *     await page.evaluate("window.__ready === true");
  *   } catch (e) {
  *     if (e instanceof CommandError && e.code === "threw") {
  *       // the expression itself is broken; e.message has the exception text
@@ -88,7 +89,7 @@ export class CommandError extends BrowserScaleError {
 }
 
 /**
- * ClickError is thrown by {@link CloudBrowser.click} when the click did not
+ * ClickError is thrown by {@link Page.click} when the click did not
  * land — the target was found but another element covered the intended point.
  * `occluder` describes the blocker; `result` carries the resolved element and
  * coordinates (success is false).
@@ -101,13 +102,20 @@ export class ClickError extends BrowserScaleError {
   /**
    * Machine-stable failure code, e.g. `"occluded_no_reachable_point"` (target
    * fully covered, no exposed part reachable), `"occluded_after_evade"` (a
-   * reposition was tried but the target was still covered) or `"not_found"`.
+   * reposition was tried but the target was still covered), `"not_found"` or
+   * `"captcha_failed"` (a captcha appeared during the click and auto-solve
+   * could not solve it, with `onFailure: "fail"`).
    */
   readonly code: string;
   /** The intercepting element (present for occlusion codes). */
   readonly occluder?: OccluderInfo;
   /** Whether a pointer reposition was tried before giving up. */
   readonly evadeAttempted: boolean;
+  /**
+   * For code `"page_not_focused"`, the page that has the focus. The call
+   * throws a {@link PageNotFocusedError} around this error then.
+   */
+  readonly focusedPageId?: string;
   /**
    * Resolved element + coordinates at the failed action. Present when this is
    * the thrown top-level error; undefined when nested inside another error.
@@ -119,6 +127,7 @@ export class ClickError extends BrowserScaleError {
     message: string;
     occluder?: OccluderInfo;
     evadeAttempted?: boolean;
+    focusedPageId?: string;
     result?: ElementResult;
   }) {
     super(formatMessage("click", init.code, init.message));
@@ -126,19 +135,22 @@ export class ClickError extends BrowserScaleError {
     this.code = init.code;
     this.occluder = init.occluder;
     this.evadeAttempted = init.evadeAttempted ?? false;
+    this.focusedPageId = init.focusedPageId;
     this.result = init.result;
   }
 }
 
 /**
- * FillError is thrown by {@link CloudBrowser.fill} when the field could not be
+ * FillError is thrown by {@link Page.fill} when the field could not be
  * focused/typed. The click-phase codes (`"not_found"`,
  * `"occluded_no_reachable_point"`, `"occluded_after_evade"`) mirror the
  * underlying focus click, with diagnostics under `clickError`. The focus codes
  * are `"focus_stolen"` (another element took focus — `focusedElement` names it;
  * fill is strictly target-bound and will not type into the thief) and
- * `"focus_lost"` (focus left the target and nothing is focused). For untargeted
- * stream typing that lets focus move (e.g. OTP), use {@link CloudBrowser.type}.
+ * `"focus_lost"` (focus left the target and nothing is focused).
+ * `"captcha_failed"`: a captcha appeared during the fill and auto-solve could
+ * not solve it, with `onFailure: "fail"`. For untargeted stream typing that
+ * lets focus move (e.g. OTP), use {@link Page.type}.
  */
 export class FillError extends BrowserScaleError {
   /** Machine-stable failure code (see the class doc for the full set). */
@@ -190,11 +202,12 @@ export class FillError extends BrowserScaleError {
 }
 
 /**
- * DragError is thrown by {@link CloudBrowser.dragBy} / {@link CloudBrowser.dragTo}
+ * DragError is thrown by {@link Page.dragBy} / {@link Page.dragTo}
  * when the source element could not be acquired/pressed. Drag picks up the
- * source with the same smart click as {@link CloudBrowser.click}, so a pre-drag
+ * source with the same smart click as {@link Page.click}, so a pre-drag
  * failure is a click failure: `code` mirrors it and the full click diagnostics
- * live under `clickError`.
+ * live under `clickError`. `"captcha_failed"`: a captcha appeared during the
+ * drag and auto-solve could not solve it, with `onFailure: "fail"`.
  */
 export class DragError extends BrowserScaleError {
   readonly code: string;
@@ -217,7 +230,7 @@ export class DragError extends BrowserScaleError {
 }
 
 /**
- * ScrollError is thrown by {@link CloudBrowser.scrollTo} when the target could
+ * ScrollError is thrown by {@link Page.scrollTo} when the target could
  * not be located/scrolled.
  */
 export class ScrollError extends BrowserScaleError {
@@ -234,25 +247,36 @@ export class ScrollError extends BrowserScaleError {
 }
 
 /**
- * MoveError is thrown by {@link CloudBrowser.moveTo} when the target could not
+ * MoveError is thrown by {@link Page.moveTo} when the target could not
  * be located. A move has no occlusion notion, so this is the only semantic
  * failure.
  */
 export class MoveError extends BrowserScaleError {
-  /** Currently always `"not_found"`. */
+  /** `"not_found"` or `"page_not_focused"`. */
   readonly code: string;
+  /**
+   * For code `"page_not_focused"`, the page that has the focus. The call
+   * throws a {@link PageNotFocusedError} around this error then.
+   */
+  readonly focusedPageId?: string;
   readonly result: ElementResult;
 
-  constructor(init: { code: string; message: string; result: ElementResult }) {
+  constructor(init: {
+    code: string;
+    message: string;
+    focusedPageId?: string;
+    result: ElementResult;
+  }) {
     super(formatMessage("moveTo", init.code, init.message));
     this.name = "MoveError";
     this.code = init.code;
+    this.focusedPageId = init.focusedPageId;
     this.result = init.result;
   }
 }
 
 /**
- * SelectOptionError is thrown by the {@link CloudBrowser.selectByIndex} /
+ * SelectOptionError is thrown by the {@link Page.selectByIndex} /
  * `selectByValue` / `selectByText` calls when the option could not be selected.
  * selectOption is programmatic (no pointer gate), so it only reports semantic
  * failures.
@@ -274,7 +298,7 @@ export class SelectOptionError extends BrowserScaleError {
 }
 
 /**
- * WaitError is thrown by {@link CloudBrowser.wait} / {@link CloudBrowser.waitAny}
+ * WaitError is thrown by {@link Page.wait} / {@link Page.waitAny}
  * when no condition matched before the deadline. `conditions` holds the
  * per-condition breakdown (same order/length as the conditions passed in)
  * explaining why each one never matched.
@@ -284,21 +308,137 @@ export class WaitError extends BrowserScaleError {
   readonly code: string;
   /** Per-condition status, same order/length as the conditions passed to wait. */
   readonly conditions: WaitConditionStatus[];
-  /** The partial wait result (index is -1 on timeout). */
-  readonly result: WaitResult;
 
   constructor(init: {
     code: string;
     message: string;
     conditions: WaitConditionStatus[];
-    result: WaitResult;
   }) {
     super(formatMessage("wait", init.code, init.message));
     this.name = "WaitError";
     this.code = init.code;
     this.conditions = init.conditions;
-    this.result = init.result;
   }
+}
+
+/**
+ * PageClosedError is thrown by a {@link Page} call when the page has closed.
+ * `focusedPage` is the page that has the focus now, usually the one that
+ * opened the closed page.
+ *
+ *   try {
+ *     await page.click(css("#next"));
+ *   } catch (e) {
+ *     if (e instanceof PageClosedError) page = e.focusedPage;
+ *   }
+ */
+export class PageClosedError extends BrowserScaleError {
+  /** The id of the page that closed. */
+  readonly pageId: string;
+  /** The page that has the focus now. */
+  readonly focusedPage: Page;
+
+  constructor(init: { pageId: string; focusedPage: Page; cause?: unknown }) {
+    super(
+      `page ${init.pageId} was closed; page ${init.focusedPage.id} has the focus`,
+      init.cause,
+    );
+    this.name = "PageClosedError";
+    this.pageId = init.pageId;
+    this.focusedPage = init.focusedPage;
+  }
+}
+
+/**
+ * PageNotFocusedError is thrown by {@link Page.click}, {@link Page.moveTo} and
+ * the calls built on them ({@link Page.fill}, {@link Page.dragBy},
+ * {@link Page.dragTo}) when the page does not have the focus, typically
+ * because it opened a tab or popup that came to the front. `focusedPage` is
+ * that page; {@link Page.focus} brings this one back.
+ *
+ * `cause` is the call's own error ({@link ClickError}, {@link MoveError},
+ * {@link FillError} or {@link DragError}) with its partial result.
+ *
+ *   try {
+ *     await page.click(css("a[target=_blank]"));
+ *     await page.click(css("#next"));
+ *   } catch (e) {
+ *     if (e instanceof PageNotFocusedError) page = e.focusedPage; // continue in the new tab
+ *   }
+ */
+export class PageNotFocusedError extends BrowserScaleError {
+  /** The page that has the focus. */
+  readonly focusedPage: Page;
+  declare readonly cause: ClickError | MoveError | FillError | DragError;
+
+  constructor(init: { focusedPage: Page; cause: ClickError | MoveError | FillError | DragError }) {
+    super(init.cause.message, init.cause);
+    this.name = "PageNotFocusedError";
+    this.focusedPage = init.focusedPage;
+  }
+}
+
+const codePageNotFocused = "page_not_focused";
+
+/**
+ * @internal Returns the focused page's id when err says the page does not have
+ * the focus.
+ */
+export function focusedPageIdOf(err: unknown): string | undefined {
+  if (err instanceof ClickError || err instanceof MoveError) {
+    return err.code === codePageNotFocused ? err.focusedPageId : undefined;
+  }
+  if (err instanceof FillError || err instanceof DragError) {
+    return err.clickError?.code === codePageNotFocused ? err.clickError.focusedPageId : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * NoPageError is thrown by the calls that need the focused page
+ * ({@link CloudBrowser.focusedPage}, {@link CloudBrowser.startStream}) while
+ * the browser has no page yet. A browser starts without one;
+ * {@link CloudBrowser.createPage} opens the first.
+ *
+ *   try {
+ *     page = await browser.focusedPage();
+ *   } catch (e) {
+ *     if (e instanceof NoPageError) page = await browser.createPage();
+ *   }
+ */
+export class NoPageError extends BrowserScaleError {
+  constructor(cause?: unknown) {
+    super("the browser has no page yet; createPage() opens one", cause);
+    this.name = "NoPageError";
+  }
+}
+
+const noPagePrefix = "NO_PAGE:";
+
+/**
+ * @internal Returns the {@link NoPageError} the server's NO_PAGE status stands
+ * for, or undefined for any other error.
+ */
+export function noPageFrom(err: unknown): NoPageError | undefined {
+  if (!(err instanceof ConnectError) || err.code !== Code.FailedPrecondition) return undefined;
+  return err.rawMessage.startsWith(noPagePrefix) ? new NoPageError(err) : undefined;
+}
+
+const pageClosedPrefix = "PAGE_CLOSED: focusedPageId=";
+
+/**
+ * @internal Returns the {@link PageClosedError} the server's PAGE_CLOSED status
+ * stands for, or undefined for any other error.
+ */
+export function pageClosedFrom(
+  err: unknown,
+  pageId: string,
+  page: (id: string) => Page,
+): PageClosedError | undefined {
+  if (!(err instanceof ConnectError) || err.code !== Code.FailedPrecondition) return undefined;
+  if (!err.rawMessage.startsWith(pageClosedPrefix)) return undefined;
+  const focused = err.rawMessage.slice(pageClosedPrefix.length);
+  return new PageClosedError({ pageId, focusedPage: page(focused), cause: err });
 }
 
 function formatMessage(action: string, code: string, message: string): string {

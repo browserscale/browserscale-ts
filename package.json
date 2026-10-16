@@ -1,7 +1,7 @@
 {
   "name": "browserscale-ts",
-  "version": "1.10.0",
-  "description": "Official SDK for browserscale — undetected stealth browsers in the cloud. Rent real Chromium sessions with unique fingerprints, built-in proxies, captcha solving, human-like input and live video — scale web scraping and automation without running a single browser yourself.",
+  "version": "1.11.0",
+  "description": "Official TypeScript SDK for browserscale: real Chromium in the cloud with waits, clicks and frames handled inside the engine. One wait for every way a page can go, clicks that name what blocked them, standing reactions, captcha solving and live takeover, from Node or the browser.",
   "main": "dist/index.js",
   "type": "module",
   "types": "dist/index.d.ts",

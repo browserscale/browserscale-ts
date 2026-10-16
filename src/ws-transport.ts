@@ -10,10 +10,7 @@ import { create, toBinary, fromBinary } from "@bufbuild/protobuf";
 
 let nextId = 0;
 
-/**
- * Response frame status byte, mirroring the wsStatus constants in
- * internal/bserver/ws_grpc_proxy.go.
- */
+/** Response frame status byte, as the server's WebSocket bridge sends it. */
 const STATUS_OK = 0;
 const STATUS_ERROR = 1;
 const STATUS_STREAM_MSG = 2;

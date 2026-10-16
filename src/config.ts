@@ -1,4 +1,22 @@
 /**
+ * The protocol the browser speaks to its proxy. `"http"` (CONNECT) is the
+ * default. A SOCKS5 proxy always resolves host names itself, so `"socks5"`
+ * covers what is elsewhere called `socks5h`.
+ */
+export type ProxyScheme = "http" | "socks5";
+
+/** Optional parts of a proxy beyond host, port and credentials. */
+export interface ProxyOptions {
+  /** The proxy's protocol; `"http"` when omitted. */
+  scheme?: ProxyScheme;
+  /**
+   * A MASQUE proxy (`"host:port"`) that carries HTTP/3 with the proxy's
+   * credentials. See {@link BrowserConfig.withMasque}.
+   */
+  masque?: string;
+}
+
+/**
  * Configuration for renting a browser session.
  * Create with the required parameters, then chain optional setters.
  *
@@ -18,6 +36,8 @@ export class BrowserConfig {
   private _countryCode?: string;
   private _timezone?: string;
   private _fingerprint?: string;
+  private _proxyScheme?: ProxyScheme;
+  private _masqueProxy?: string;
 
   constructor(
     apiKey: string,
@@ -33,6 +53,45 @@ export class BrowserConfig {
     this.proxyPort = proxyPort;
     this.proxyUsername = proxyUsername;
     this.proxyPassword = proxyPassword;
+  }
+
+  /**
+   * Sets the protocol of the proxy passed to the constructor. Without it
+   * the proxy is an HTTP proxy.
+   *
+   * @param scheme - `"http"` or `"socks5"`
+   *
+   * @returns this BrowserConfig for chaining
+   *
+   * @example
+   * new BrowserConfig(apiKey, 600, "proxy.example.com", 1080, "user", "pass").withProxyScheme("socks5");
+   */
+  withProxyScheme(scheme: ProxyScheme): BrowserConfig {
+    this._proxyScheme = scheme;
+    return this;
+  }
+
+  /**
+   * Routes the session's HTTP/3 traffic through a MASQUE proxy
+   * (CONNECT-UDP, RFC 9298), authenticated with the username and password
+   * of the proxy passed to the constructor.
+   *
+   * The MASQUE proxy has to leave from the same exit IP as the proxy, so
+   * the browser shows one address: the rental is refused when they differ.
+   * Use credentials that keep their IP (a sticky session) where the
+   * provider rotates. Without a MASQUE proxy, HTTP/3 falls back to the
+   * proxy over TCP.
+   *
+   * @param hostPort - the MASQUE proxy as `"host:port"`
+   *
+   * @returns this BrowserConfig for chaining
+   *
+   * @example
+   * new BrowserConfig(apiKey, 600, "proxy.example.com", 8080, "user", "pass").withMasque("masque.example.com:443");
+   */
+  withMasque(hostPort: string): BrowserConfig {
+    this._masqueProxy = hostPort;
+    return this;
   }
 
   /**
@@ -98,5 +157,13 @@ export class BrowserConfig {
 
   get fingerprint(): string | undefined {
     return this._fingerprint;
+  }
+
+  get proxyScheme(): ProxyScheme | undefined {
+    return this._proxyScheme;
+  }
+
+  get masqueProxy(): string | undefined {
+    return this._masqueProxy;
   }
 }

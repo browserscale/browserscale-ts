@@ -7,14 +7,14 @@
 
 import type { Locator } from "./locator.ts";
 
-/** Mouse button used by {@link CloudBrowser.click}. */
+/** Mouse button used by {@link Page.click}. */
 export type Button = "left" | "right" | "middle";
 
-/** Mouse phase performed by {@link CloudBrowser.click}. */
+/** Mouse phase performed by {@link Page.click}. */
 export type ClickAction = "click" | "press" | "release";
 
 /**
- * Optional customization for {@link CloudBrowser.click}. All fields are
+ * Optional customization for {@link Page.click}. All fields are
  * optional; missing or zero values mean "use the server default".
  */
 export interface ClickOpts {
@@ -40,7 +40,8 @@ export interface ClickOpts {
 }
 
 /**
- * Optional customization for {@link CloudBrowser.addReaction}. All fields are
+ * Optional customization for {@link Page.addReaction} and
+ * {@link CloudBrowser.addReaction}. All fields are
  * optional; missing or zero values mean "use the server default".
  */
 export interface ReactionOpts {
@@ -63,7 +64,7 @@ export interface ReactionOpts {
 }
 
 /**
- * Optional customization for {@link CloudBrowser.fill}. All fields are
+ * Optional customization for {@link Page.fill}. All fields are
  * optional; missing values mean "use the server default".
  */
 export interface FillOpts {
@@ -96,8 +97,8 @@ export interface FillOpts {
 }
 
 /**
- * Optional customization for {@link CloudBrowser.selectByIndex},
- * {@link CloudBrowser.selectByValue} and {@link CloudBrowser.selectByText}.
+ * Optional customization for {@link Page.selectByIndex},
+ * {@link Page.selectByValue} and {@link Page.selectByText}.
  */
 export interface SelectOpts {
   /**
@@ -114,16 +115,16 @@ export interface SelectOpts {
   fireEvents?: boolean;
 }
 
-/** Optional customization for {@link CloudBrowser.wait} / {@link CloudBrowser.waitForAny}. */
+/** Optional customization for {@link Page.wait} / {@link Page.waitAny}. */
 export interface WaitOpts {
   /** Omitted leaves it to the API, which defaults to 30 000 ms. */
   timeoutMs?: number;
 }
 
-/** Lifecycle event {@link CloudBrowser.navigate} waits for before returning. */
+/** Lifecycle event {@link Page.navigate} waits for before returning. */
 export type WaitUntil = "load" | "domcontentloaded" | "networkidle";
 
-/** Optional customization for {@link CloudBrowser.navigate}. */
+/** Optional customization for {@link Page.navigate}. */
 export interface NavigateOpts {
   /** Default 30 000 ms. */
   timeoutMs?: number;
@@ -131,7 +132,7 @@ export interface NavigateOpts {
   waitUntil?: WaitUntil;
 }
 
-/** Optional customization for {@link CloudBrowser.loadHTML}. */
+/** Optional customization for {@link Page.loadHTML}. */
 export interface LoadHTMLOpts {
   /** Extra headers to attach to the synthetic response. */
   headers?: { name: string; value: string }[];
@@ -144,7 +145,7 @@ export interface GetDOMOpts {
   depth?: number;
 }
 
-/** Optional customization for {@link CloudBrowser.getObservation}. */
+/** Optional customization for {@link Page.getObservation}. */
 export interface GetObservationOpts {
   /**
    * `"text"` (default) for the compact line format meant to be handed to a
@@ -200,7 +201,7 @@ export interface GetObservationOpts {
   frameId?: string;
 }
 
-/** Optional customization for {@link CloudBrowser.screenshot}. */
+/** Optional customization for {@link Page.screenshot}. */
 export interface ScreenshotOpts {
   /** Image format: "png" (default), "jpeg", or "webp". */
   format?: "png" | "jpeg" | "webp";
@@ -208,7 +209,7 @@ export interface ScreenshotOpts {
   quality?: number;
 }
 
-/** Optional customization for {@link CloudBrowser.readCanvas}. */
+/** Optional customization for {@link Page.readCanvas}. */
 export interface ReadCanvasOpts {
   /**
    * Override the locator's frame. Omit to use the locator's own

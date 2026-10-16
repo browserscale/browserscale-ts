@@ -7,10 +7,22 @@ import { sessionUsageFromJson } from "./internal/convert.ts";
 // Public API ──────────────────────────────────────────────────────────
 
 export { CloudBrowser } from "./client.ts";
-export { BrowserConfig } from "./config.ts";
+export { Page } from "./page.ts";
+export { BrowserConfig, type ProxyOptions, type ProxyScheme } from "./config.ts";
 
 // Locator + constructors + AllFrames sentinel
 export { Locator, css, js, node, at, AllFrames } from "./locator.ts";
+
+// Wait-only conditions (accepted by wait()/waitAny(), not by actions)
+export {
+  CaptchaCondition,
+  RequestCondition,
+  ResponseCondition,
+  captcha,
+  request,
+  response,
+} from "./locator.ts";
+export type { WaitCondition } from "./locator.ts";
 
 // Defaults the SDK applies before sending a request
 export {
@@ -30,6 +42,9 @@ export {
   MoveError,
   SelectOptionError,
   WaitError,
+  PageClosedError,
+  PageNotFocusedError,
+  NoPageError,
 } from "./errors.ts";
 
 // Plain user-facing types
@@ -48,6 +63,12 @@ export type {
   NetworkBodyRange,
   NetworkCaptureOptions,
   WaitResult,
+  WaitKind,
+  WaitElementResult,
+  WaitCaptchaResult,
+  WaitRequestResult,
+  WaitResponseResult,
+  WaitElement,
   WaitConditionStatus,
   OccluderInfo,
   ElementRef,
@@ -55,6 +76,8 @@ export type {
   EvaluateResult,
   ElementResult,
   DragResult,
+  CaptchaInterruption,
+  CaptchaAutoSolveOpts,
   SelectOptionResult,
   ScreenshotResult,
   ReadCanvasResult,
@@ -104,6 +127,16 @@ export {
   type ScriptResult,
   type ScriptRunInfo,
 } from "./scripts.ts";
+
+// Context events (pages opening, closing, focus, updates, captcha solves)
+export {
+  ContextEvents,
+  type ContextEvent,
+  type ContextEventHandler,
+  type CaptchaDetectedEvent,
+  type CaptchaResolvedEvent,
+  type ReactionFiredEvent,
+} from "./context-events.ts";
 
 // Network capture (traffic log)
 export { NetworkCapture, type NetworkExchangeHandler } from "./network-capture.ts";
@@ -166,7 +199,7 @@ export function setApiEndpoint(endpoint: string): void {
  * const cfg = new BrowserConfig("sk_…", 600, "", 0, "", "");
  * const browser = await rentBrowser(cfg);
  * try {
- *   await browser.navigate("https://example.com");
+ *   await page.navigate("https://example.com");
  * } finally {
  *   await browser.stopBrowser();
  * }
@@ -201,7 +234,7 @@ export async function rentBrowser(config: BrowserConfig): Promise<CloudBrowser> 
  * @example
  * const browser = connectSession(grpcUrl, apiKey, sessionId);
  * try {
- *   await browser.navigate("https://example.com");
+ *   await page.navigate("https://example.com");
  * } finally {
  *   await browser.stopBrowser();
  * }
@@ -327,6 +360,8 @@ async function callRentApi(config: BrowserConfig): Promise<RentResponse> {
   if (config.countryCode) body.countryCode = config.countryCode;
   if (config.timezone) body.timezone = config.timezone;
   if (config.fingerprint) body.fingerprint = config.fingerprint;
+  if (config.proxyScheme) body.proxyScheme = config.proxyScheme;
+  if (config.masqueProxy) body.masqueProxy = config.masqueProxy;
 
   const resp = await fetch(`${apiEndpoint}/rent`, {
     method: "POST",

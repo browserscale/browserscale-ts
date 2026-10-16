@@ -11,7 +11,7 @@ export interface ScriptLogEntry {
   timestamp: Date;
 }
 
-/** The outcome of a blocking {@link CloudBrowser.runScript}. */
+/** The outcome of a blocking {@link Page.runScript}. */
 export interface ScriptResult {
   /**
    * False when the script failed to compile or threw; `result` then holds the
@@ -53,7 +53,7 @@ export interface ScriptFinished {
   stopped: boolean;
 }
 
-/** One run still in flight, as {@link CloudBrowser.listScriptRuns} reports it. */
+/** One run still in flight, as {@link Page.listScriptRuns} reports it. */
 export interface ScriptRunInfo {
   runId: string;
   /** How long the run has been going, in milliseconds. */
@@ -123,7 +123,7 @@ export function scriptEventFromProto(event: ScriptEventMessage): ScriptEvent | n
 
 /**
  * ScriptRun is a script running in the background, returned by
- * {@link CloudBrowser.startScript}. Its output is delivered to the handler
+ * {@link Page.startScript}. Its output is delivered to the handler
  * passed there; this handle exists to await the outcome and to cancel the run.
  */
 export class ScriptRun {
@@ -159,8 +159,8 @@ export class ScriptRun {
 
   /**
    * The id the browser gave this run. Pass it to
-   * {@link CloudBrowser.stopScripts} to cancel the run from elsewhere, or to
-   * {@link CloudBrowser.followScript} to watch it from another tab.
+   * {@link Page.stopScripts} to cancel the run from elsewhere, or to
+   * {@link Page.followScript} to watch it from another tab.
    */
   get runId(): string {
     return this.id;
@@ -278,7 +278,7 @@ export class ScriptRun {
 
 /**
  * ScriptFollow is a read-only view of script output, returned by
- * {@link CloudBrowser.followScript}.
+ * {@link Page.followScript}.
  */
 export class ScriptFollow {
   private readonly abort: AbortController;

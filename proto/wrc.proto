@@ -16,12 +16,37 @@ import "google/protobuf/empty.proto";
 // are not exposed on the wire (server resolves them from session_id).
 //
 // `page_id` stays as an explicit parameter, mirroring WRC.pdl exactly:
-// one browser context can host multiple pages (tabs/popups).
+// one browser context can host multiple pages (tabs/popups). Every page
+// command requires it; GetFocusedPage names the page a person would be looking
+// at. A page_id of a page that closed recently fails with FAILED_PRECONDITION
+// and a message "PAGE_CLOSED: focusedPageId=<id>", naming the page that has
+// the focus now; an id the context never had fails with NOT_FOUND
+// ("PAGE_NOT_FOUND: ..."). A session starts without a page: CreatePage opens
+// the first, and a call that needs the focused page before that fails with
+// FAILED_PRECONDITION ("NO_PAGE: ...").
 
 service Browser {
   // Context-level
   rpc SetProxy(SetProxyRequest) returns (CommandResult);
   rpc GetPages(GetPagesRequest) returns (GetPagesResponse);
+  // Opens a page the way opening a new tab does: an about:blank tab that
+  // takes the focus. A session starts without a page, so this is the first
+  // call after rent; it answers once the page is ready for Navigate.
+  rpc CreatePage(CreatePageRequest) returns (CreatePageResponse);
+  // The page of the context that has the focus. Once the context has a page
+  // it always has one; before the first CreatePage this fails with NO_PAGE.
+  rpc GetFocusedPage(GetFocusedPageRequest) returns (GetFocusedPageResponse);
+  // Brings a page to the front, the way clicking its tab does.
+  rpc FocusPage(FocusPageRequest) returns (CommandResult);
+  // Closes a page the way closing its tab does, and reports which page has
+  // the focus afterwards.
+  rpc ClosePage(ClosePageRequest) returns (ClosePageResponse);
+  // The context's pages as they change: first a snapshot of every page, then
+  // each page opening, closing, taking the focus or changing its address or
+  // title, until the client goes away or the session ends. A snapshot can
+  // come again later; it then replaces everything the client holds. Applying
+  // the events in order to the last snapshot gives the current pages.
+  rpc StreamContextEvents(StreamContextEventsRequest) returns (stream ContextEvent);
   // What the session has consumed so far. The final figures need no call of
   // their own: the stop endpoint returns them.
   rpc GetUsage(GetUsageRequest) returns (GetUsageResponse);
@@ -45,8 +70,10 @@ service Browser {
   rpc Fill(FillRequest) returns (FillResult);
 
   // Reactions — one-shot background auto-click when a condition matches. A
-  // shared per-page poller fires only while the pointer is idle, so a reaction
-  // slots into the gaps of a retrying foreground action.
+  // reaction that fires pauses the running input action at a safe point,
+  // clicks, and lets the action carry on. A reaction belongs to one page or
+  // to every page of the session; each click is reported as reaction_fired on
+  // StreamContextEvents.
   rpc AddReaction(AddReactionRequest) returns (AddReactionResponse);
   rpc RemoveReaction(RemoveReactionRequest) returns (RemoveReactionResponse);
   rpc ListReactions(ListReactionsRequest) returns (ListReactionsResponse);
@@ -127,12 +154,42 @@ service Browser {
 
   // Captcha solver
   rpc SolveCaptcha(SolveCaptchaRequest) returns (SolveCaptchaResponse);
+  // Solves captchas on the session's pages as they appear, without being
+  // asked: every page, frame and popup, including ones opened later. Each
+  // solve is reported on StreamContextEvents (captcha_detected, then exactly
+  // one captcha_resolved with the same solve_id).
+  //
+  // A Click, Drag, Fill or Type running on the page when a captcha appears is
+  // held at its next safe point — between two keys, before the button goes
+  // down — and carries on after the solve; its result lists the solve under
+  // captchas. One started while a solve runs waits for it. Time spent held
+  // does not count against the command's timeout, nor against a WaitForAny's.
+  // InsertText and PressKey/ReleaseKey are refused with code "busy" while a
+  // solve runs. While a WaitForAny with a captcha condition runs on a page,
+  // auto-solve leaves that page's captchas alone, so the wait sees them
+  // first.
+  //
+  // Calling it again replaces the settings; solves already running keep the
+  // ones they started with. Lasts until DisableCaptchaAutoSolve or the end of
+  // the session.
+  rpc EnableCaptchaAutoSolve(EnableCaptchaAutoSolveRequest) returns (CommandResult);
+  // Stops auto-solve. A solve already running finishes; one waiting for the
+  // focus is resolved with code "disabled".
+  rpc DisableCaptchaAutoSolve(DisableCaptchaAutoSolveRequest) returns (DisableCaptchaAutoSolveResponse);
 
-  // Live streaming (WebRTC). The page is streamed as a video track over a
+  // Live streaming (WebRTC). The session is streamed as a video track over a
   // WebRTC PeerConnection whose media is relayed through the TURN server. The
   // caller creates the offer (client-offerer); the browser answers it.
   // GetStreamConfig first hands out the ICE servers the client needs to build
   // that offer.
+  //
+  // The stream shows the page that has the focus and follows it: when a tab
+  // or popup comes to the front, or FocusPage brings another page forward,
+  // picture and input move there and the new viewport is pushed on the
+  // "input" channel. While the shown page closes, the last picture stays
+  // until the next page is shown; the stream keeps running. One stream per
+  // session. Before the first CreatePage there is nothing to show, and
+  // StartStream fails with NO_PAGE.
   rpc GetStreamConfig(GetStreamConfigRequest) returns (GetStreamConfigResponse);
   rpc StartStream(StartStreamRequest) returns (StartStreamResponse);
   rpc StopStream(StopStreamRequest) returns (CommandResult);
@@ -189,6 +246,208 @@ message PageInfo {
   string title = 4;
   Rect viewport = 5;
   FrameInfo frame_tree = 6;
+  // Whether this is the page of the context that has the focus. Exactly one
+  // page per context has it; input (click, moveTo and what builds on them)
+  // only acts on that page.
+  bool is_focused = 7;
+  // A popup window (window.open with window features) rather than a tab.
+  bool is_popup = 8;
+  // The page that opened this one, if it is still open. Also set for
+  // rel=noopener, since the page still came from it.
+  optional string opener_page_id = 9;
+  // The frame that opened this page; may be a subframe of opener_page_id.
+  optional string opener_frame_id = 10;
+}
+
+message CreatePageRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+message CreatePageResponse {
+  // False iff no page was opened (then error is present).
+  bool success = 1;
+  // The new page. Set iff success.
+  PageInfo page = 2;
+  // Codes: "create_failed" (the browser could not open the page, typically
+  // capacity).
+  optional CommandError error = 3;
+}
+
+message GetFocusedPageRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+message GetFocusedPageResponse {
+  string page_id = 1;
+}
+
+message FocusPageRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+}
+
+message ClosePageRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+}
+
+message ClosePageResponse {
+  // False iff the page is still open (then error is present).
+  bool success = 1;
+  // The page that has the focus once the closed one is gone. Set iff success.
+  optional string focused_page_id = 2;
+  // Codes: "last_page" (a context keeps at least one page; stop the session
+  // to end it), "timeout" (the page was still open after a few seconds).
+  optional CommandError error = 3;
+}
+
+message StreamContextEventsRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+// One change to the context's pages.
+message ContextEvent {
+  oneof event {
+    // Every page of the context. Sent first, and again if the client fell so
+    // far behind that events had to be dropped; it replaces what the client
+    // holds.
+    ContextSnapshot snapshot = 1;
+    // A page opened: a tab or popup one of the pages opened, or one a command
+    // created. A page that takes the focus as it opens is followed by a
+    // page_focused.
+    PageInfo page_opened = 2;
+    PageClosedEvent page_closed = 3;
+    PageFocusedEvent page_focused = 4;
+    PageUpdatedEvent page_updated = 5;
+    // A captcha was found on a page, by auto-solve or by a SolveCaptcha call.
+    // Exactly one captcha_resolved with the same solve_id follows.
+    CaptchaDetectedEvent captcha_detected = 6;
+    CaptchaResolvedEvent captcha_resolved = 7;
+    // A reaction clicked on a page (see AddReaction).
+    ReactionFiredEvent reaction_fired = 8;
+  }
+}
+
+message ContextSnapshot {
+  repeated PageInfo pages = 1;
+}
+
+message PageClosedEvent {
+  string page_id = 1;
+  // The page that has the focus now. A page_focused follows if the focus
+  // moved.
+  string focused_page_id = 2;
+}
+
+// Another page has the focus.
+message PageFocusedEvent {
+  string page_id = 1;
+}
+
+// A navigation committed or the page set a new title.
+message PageUpdatedEvent {
+  string page_id = 1;
+  string url = 2;
+  string title = 3;
+}
+
+// A captcha was found. Exactly one CaptchaResolvedEvent with the same solve_id
+// follows, whatever happens to the solve: solved, failed, the page closing,
+// auto-solve being disabled. Unlike the page events these are reports, not
+// state: a client that fell so far behind that it got a new snapshot may have
+// missed some.
+message CaptchaDetectedEvent {
+  string page_id = 1;
+  // The frame the challenge was found in.
+  string frame_id = 2;
+  // Identifies this solve in captcha_resolved and in the captchas of the
+  // commands it held.
+  string solve_id = 3;
+  // What found it: "auto" (EnableCaptchaAutoSolve) or "command"
+  // (SolveCaptcha).
+  string trigger = 4;
+  // "solving": the solve starts now.
+  // "waiting_for_focus": the page does not have the focus and auto-solve is
+  //   set to wait for it (unfocused "wait"). The solve starts once the page
+  //   has the focus (FocusPage, or the page coming to the front), or when a
+  //   SolveCaptcha call on the page asks for it.
+  // "skipped": the page reached max_solves_per_minute, so it is not solved.
+  //   captcha_resolved follows at once with code "limit_reached".
+  string state = 5;
+  // The command running on the page when the captcha appeared ("click",
+  // "fill", ...), which is held until the solve ends.
+  optional string interrupted_command = 6;
+}
+
+// A solve announced by CaptchaDetectedEvent ended.
+message CaptchaResolvedEvent {
+  string page_id = 1;
+  string solve_id = 2;
+  // Whether the challenge was solved.
+  bool success = 3;
+  // From detection to this event, in milliseconds, including any wait for
+  // the focus.
+  double duration_ms = 4;
+  // Interaction rounds the solve needed; 0 if it never got to interact.
+  int32 attempts = 5;
+  // As in captcha_detected.
+  optional string interrupted_command = 6;
+  // What the interrupted command does now:
+  //   "resumed": it carries on in the same document (a fill types the rest
+  //     of its text, a click goes for its target again).
+  //   "restarted": the solve replaced the document, so it starts over (a fill
+  //     locates its field again and types the whole text; one that targeted
+  //     a backend_node_id fails instead, the node is gone).
+  //   "continued": the solve failed and on_failure is "continue": the command
+  //     carries on as if it had succeeded.
+  //   "failed": the solve failed and on_failure is "fail": the command ends
+  //     with code "captcha_failed".
+  optional string interrupted_outcome = 7;
+  // Present iff success is false. Codes: "solve_failed" (the challenge did
+  // not clear), "timeout" (solve_timeout_ms passed), "limit_reached" (see
+  // captcha_detected.state), "page_closed" (the page closed), "disabled"
+  // (auto-solve was disabled before the solve started), "cancelled" (a
+  // Navigate or LoadHTML of the page started during the solve).
+  optional CommandError error = 8;
+}
+
+// A reaction clicked on a page. Its one shot on that page is spent, whether
+// the click landed or not; a reaction stopped before it pressed reports
+// nothing and stays armed. A report, not state, like the captcha events.
+message ReactionFiredEvent {
+  string page_id = 1;
+  // As returned by AddReaction. A reaction registered for every page reports
+  // the same id from each page it fires on.
+  string reaction_id = 2;
+  // The frame the match was found in.
+  string frame_id = 3;
+  // Whether the click landed.
+  bool success = 4;
+  // The command the reaction paused on the page ("click", "fill", ...),
+  // which carried on after it.
+  optional string interrupted_command = 5;
+  // Present iff success is false. Codes as for Click: "not_found",
+  // "occluded_no_reachable_point", "occluded_after_evade"; or "failed" if the
+  // click could not be carried out at all.
+  optional CommandError error = 6;
+}
+
+// A captcha solve that held a command while it ran. Listed in that command's
+// result, in order.
+message CaptchaInterruption {
+  // As in captcha_detected / captcha_resolved.
+  string solve_id = 1;
+  bool success = 2;
+  // How long the command was held, in milliseconds.
+  double duration_ms = 3;
+  // "resumed", "restarted", "continued" or "failed", see
+  // CaptchaResolvedEvent.interrupted_outcome.
+  string outcome = 4;
 }
 
 message Header {
@@ -245,20 +504,54 @@ message CookieParam {
 // Waiting
 // ──────────────────────────────────────────────────────────────────────
 
-// Exactly one of `selector` or `js_expression` must be set per condition.
+// A network event a wait condition watches for. url_pattern is a wildcard
+// ("*" spans any characters) matched against the URL of every request the
+// page's context issues after the wait starts — the page, its frames, and any
+// tab or popup it opens.
+message WaitNetworkCondition {
+  string url_pattern = 1;
+  // request: the request is not sent and the page receives an empty 200.
+  // response: the page receives an empty 200 instead of the real response,
+  // which is still returned in the WaitResult.
+  bool abort = 2;
+}
+
+// Exactly one of `selector`, `js_expression`, `captcha`, `request` or
+// `response` must be set per condition. `visible` and `steady_time` only
+// apply to element conditions (selector / js_expression).
+//
+// selector, js_expression and captcha are states: they match when the page is
+// (or becomes) in that state. request and response are events: they match the
+// first matching request issued after the wait started (response: once its
+// response is complete), so start the wait before the action that triggers it.
 message WaitCondition {
   optional string selector = 1;
   optional string js_expression = 2;
   optional bool visible = 3;
   optional double steady_time = 4;
+  // Any supported captcha / bot-protection challenge, in any frame.
+  bool captcha = 5;
+  WaitNetworkCondition request = 6;
+  WaitNetworkCondition response = 7;
+}
+
+// The element an element condition matched.
+message WaitElementMatch {
+  string frame_id = 1;
+  int32 backend_node_id = 2;
+  bool is_visible = 3;
+  Rect bounds = 4;
 }
 
 message WaitResult {
   int32 index = 1;
-  string frame_id = 2;
-  int32 backend_node_id = 3;
-  bool is_visible = 4;
-  Rect bounds = 5;
+  // What matched: "element", "captcha", "request" or "response". Empty when
+  // nothing matched. Exactly the field of that name below is set (a captcha
+  // match carries no payload).
+  string kind = 8;
+  WaitElementMatch element = 9;
+  InterceptedRequest request = 10;
+  InterceptedResponse response = 11;
   // False iff nothing matched before the deadline. Redundant with index -1, and
   // carried anyway so every command answers the same question the same way.
   bool success = 7;
@@ -266,13 +559,15 @@ message WaitResult {
   // per-condition breakdown of why nothing matched. A timeout is a normal
   // result, not an RPC error.
   optional WaitError error = 6;
+  reserved 2, 3, 4, 5;
 }
 
 // Per-condition diagnostic status returned inside WaitError when WaitForAny
 // times out; one entry per input condition, in the same order.
 message WaitConditionStatus {
   int32 index = 1;
-  // "not_found" | "found_hidden" | "found_occluded" | "pending_steady".
+  // "not_found" | "found_hidden" | "found_occluded" | "pending_steady" |
+  // "not_seen" (request / response conditions: nothing matching happened).
   string state = 2;
   int32 backend_node_id = 3;
   string frame_id = 4;
@@ -368,13 +663,16 @@ message CommandResult {
 // success is false. CommandError plus the occlusion specifics.
 message ClickError {
   // Machine-stable failure code, e.g. "occluded_no_reachable_point" or
-  // "occluded_after_evade".
+  // "occluded_after_evade". "captcha_failed": a captcha held the click and
+  // could not be solved (see EnableCaptchaAutoSolve on_failure).
   string code = 1;
   string message = 2;
   // The intercepting element (present for occlusion codes).
   optional OccluderInfo occluder = 3;
   // Whether a pointer reposition/evade was attempted before giving up.
   optional bool evade_attempted = 4;
+  // For "page_not_focused": the page of the context that has the focus.
+  optional string focused_page_id = 5;
 }
 
 // ClickResult mirrors ElementResult (field numbers 1-7 kept identical, so it is
@@ -389,6 +687,9 @@ message ClickResult {
   double root_x = 6;
   double root_y = 7;
   optional ClickError error = 8;
+  // The captcha solves that held the click, in order (see
+  // EnableCaptchaAutoSolve). Empty if none did.
+  repeated CaptchaInterruption captchas = 9;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -412,11 +713,17 @@ message ReactionInfo {
   string frame_id = 6;
   // Whether the match additionally requires the element to be visible.
   bool visible = 7;
+  // Registered for every page (AddReaction without page_id) rather than for
+  // one.
+  bool all_pages = 8;
 }
 
 message AddReactionRequest {
   string session_id = 1;
   string api_key = 2;
+  // The page the reaction belongs to. Empty: it belongs to the session's
+  // browser and is armed on every page, the open ones and those opened later,
+  // firing once on each.
   string page_id = 3;
 
   // Exactly one of match_selector / match_js_expression must be set.
@@ -471,6 +778,8 @@ message RemoveReactionResponse {
 message ListReactionsRequest {
   string session_id = 1;
   string api_key = 2;
+  // The page to list: its own reactions and those for every page that have
+  // not fired there yet. Empty: the reactions registered for every page.
   string page_id = 3;
 }
 
@@ -509,8 +818,9 @@ message ElementRef {
 message FillError {
   // "not_found", "occluded_no_reachable_point", "occluded_after_evade"
   // (mirrored from the underlying focus click; diagnostics under click_error),
-  // "focus_stolen" (another element took focus; focused_element names it) or
-  // "focus_lost" (focus left the target and nothing is focused).
+  // "focus_stolen" (another element took focus; focused_element names it),
+  // "focus_lost" (focus left the target and nothing is focused) or
+  // "captcha_failed" (a captcha held the fill and could not be solved).
   string code = 1;
   string message = 2;
   // The underlying click-core failure that prevented focusing/typing. Present
@@ -540,6 +850,8 @@ message FillResult {
   double root_x = 6;
   double root_y = 7;
   optional FillError error = 8;
+  // The captcha solves that held the fill, in order. Empty if none did.
+  repeated CaptchaInterruption captchas = 9;
 }
 
 message DragResult {
@@ -551,12 +863,15 @@ message DragResult {
   double end_x = 6;
   double end_y = 7;
   optional DragError error = 8;
+  // The captcha solves that held the drag, in order. Empty if none did.
+  repeated CaptchaInterruption captchas = 9;
 }
 
 // Error detail for a Drag whose source pickup failed. Present in DragResult iff
 // success is false. Drag acquires+presses the source with the same smart click
 // as Click, so a pre-drag failure is a click failure: code/message mirror it
-// and the full click diagnostics are nested under click_error.
+// and the full click diagnostics are nested under click_error. Code
+// "captcha_failed": a captcha held the drag and could not be solved.
 message DragError {
   string code = 1;
   string message = 2;
@@ -619,9 +934,11 @@ message MoveResult {
 // has no occlusion notion, so the only failure is the target not being
 // locatable.
 message MoveError {
-  // Currently always "not_found".
+  // "not_found" or "page_not_focused".
   string code = 1;
   string message = 2;
+  // For "page_not_focused": the page of the context that has the focus.
+  optional string focused_page_id = 3;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -636,6 +953,11 @@ message SetProxyRequest {
   optional int32 proxy_port = 4;
   optional string proxy_username = 5;
   optional string proxy_password = 6;
+  // "http" (default) or "socks5".
+  optional string proxy_scheme = 7;
+  // host:port of a MASQUE proxy that carries HTTP/3 with the proxy's
+  // credentials; omitted = HTTP/3 falls back to the proxy.
+  optional string masque_proxy = 8;
 }
 
 message GetPagesRequest {
@@ -1346,6 +1668,7 @@ message StartDomMirrorRequest {
   optional int32 depth = 4;
   // Descend into author shadow roots. Fixed for the life of the mirror.
   optional bool pierce = 5;
+  string page_id = 6;
 
   reserved 3;  // was frame_id, before the mirror became page-wide
 }
@@ -1374,6 +1697,7 @@ message StartDomMirrorResponse {
 message StopDomMirrorRequest {
   string session_id = 1;
   string api_key = 2;
+  string page_id = 4;
 
   reserved 3;  // was frame_id; the mirror is page-wide
 }
@@ -1385,6 +1709,7 @@ message GetDomChildrenRequest {
   optional string frame_id = 4;
   // Levels below the node. Default 1.
   optional int32 depth = 5;
+  string page_id = 6;
 }
 
 message GetDomChildrenResponse {
@@ -1407,6 +1732,7 @@ message ReleaseDomSubtreeRequest {
   string api_key = 2;
   int32 backend_node_id = 3;
   optional string frame_id = 4;
+  string page_id = 5;
 }
 
 message RevealDomNodeRequest {
@@ -1414,6 +1740,7 @@ message RevealDomNodeRequest {
   string api_key = 2;
   int32 backend_node_id = 3;
   optional string frame_id = 4;
+  string page_id = 5;
 }
 
 message RevealDomNodeResponse {
@@ -1434,6 +1761,7 @@ message GetDomRevisionRequest {
   string session_id = 1;
   string api_key = 2;
   optional string frame_id = 3;
+  string page_id = 4;
 }
 
 message GetDomRevisionResponse {
@@ -1449,6 +1777,8 @@ message GetDomRevisionResponse {
 message StreamDomEventsRequest {
   string session_id = 1;
   string api_key = 2;
+  // Only this page's mirror events are delivered.
+  string page_id = 3;
 }
 
 // One batch of edits to the revealed part of the page's DOM.
@@ -1555,7 +1885,9 @@ message InsertTextRequest {
 // currently focused element (untargeted, no focus pinning) — unlike InsertText,
 // which is a single IME-style commit. Focus may move between fields mid-stream
 // (e.g. OTP inputs that auto-advance on each digit). For a strict, target-bound
-// value that must stay focused, use Fill instead.
+// value that must stay focused, use Fill instead. A captcha solve holds the
+// typing between two keys (see EnableCaptchaAutoSolve); one that could not be
+// solved ends it with code "captcha_failed".
 message TypeRequest {
   string session_id = 1;
   string api_key = 2;
@@ -1697,6 +2029,7 @@ message SolveCaptchaRequest {
   int32 timeout_ms = 3;
   // Retry the solve flow this many times before giving up.
   int32 retry_amount = 4;
+  string page_id = 5;
 }
 
 message SolveCaptchaResponse {
@@ -1704,6 +2037,42 @@ message SolveCaptchaResponse {
   // Empty on success — most challenges are completed in-page server-side
   // and require no further action from the caller. Empty on failure too.
   string result = 1;
+}
+
+message EnableCaptchaAutoSolveRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // Budget for one solve in milliseconds. 0/omitted: 60000.
+  optional int32 solve_timeout_ms = 3;
+  // Per-solve interaction retries, as in SolveCaptcha. 0/omitted uses the
+  // solver's own default.
+  optional int32 retry_amount = 4;
+  // What a held command does when the solve fails: "fail" (default) ends it
+  // with code "captcha_failed", "continue" lets it carry on.
+  optional string on_failure = 5;
+  // What happens to a captcha on a page that does not have the focus. Input
+  // only reaches the focused page, so it cannot be solved there as it is:
+  // "wait" (default) reports it and solves it once the page has the focus,
+  // "focus" brings the page to the front and solves it right away.
+  optional string unfocused = 6;
+  // At most this many solves start per page within any 60 seconds; further
+  // captchas are reported as "skipped" and resolved with "limit_reached".
+  // Protects against a page that keeps putting one up. 0/omitted: 5.
+  optional int32 max_solves_per_minute = 7;
+}
+
+message DisableCaptchaAutoSolveRequest {
+  string session_id = 1;
+  string api_key = 2;
+}
+
+message DisableCaptchaAutoSolveResponse {
+  // Whether auto-solve was enabled.
+  bool disabled = 1;
+  // Always true today: disabling without auto-solve is a no-op. Both fields
+  // are carried so every response answers the same question the same way.
+  bool success = 2;
+  optional CommandError error = 3;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1737,6 +2106,7 @@ message StartStreamRequest {
   // returns its answer. Relay policy, frame rate and bitrate are decided by the
   // server — the client only offers.
   string offer_sdp = 3;
+  reserved 4;
 }
 
 message StartStreamResponse {
@@ -1745,8 +2115,9 @@ message StartStreamResponse {
   // Root-viewport size in CSS pixels — the coordinate space the input data
   // channels expect. Delivered with the answer so the client can map pointer
   // coordinates from the first frame on, without a getPages() round trip that
-  // races the stream. x/y are always 0. Later changes arrive as
-  // {"type":"viewport","width":W,"height":H} on the reliable "input" channel.
+  // races the stream. x/y are always 0. Later changes, including the stream
+  // moving to another page, arrive as {"type":"viewport","width":W,"height":H}
+  // on the reliable "input" channel.
   Rect viewport = 2;
   // False iff the command refused; then error carries the code. See the
   // protocol definition for which codes this command can return.
@@ -1757,6 +2128,7 @@ message StartStreamResponse {
 message StopStreamRequest {
   string session_id = 1;
   string api_key = 2;
+  reserved 3;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1777,9 +2149,11 @@ message ScriptLogEntry {
 message RunScriptRequest {
   string session_id = 1;
   string api_key = 2;
-  // JavaScript source. Runs with `browser` bound to the session, so the script
+  // JavaScript source. Runs with `browser` bound to the page, so the script
   // needs no setup of its own.
   string source = 3;
+  // The page the script runs in.
+  string page_id = 4;
 }
 
 // There is deliberately no timeout on RunScript. A deadline is only useful if
@@ -1806,6 +2180,7 @@ message StartScriptRequest {
   string session_id = 1;
   string api_key = 2;
   string source = 3;
+  string page_id = 4;
 }
 
 message StartScriptResponse {
@@ -1816,9 +2191,10 @@ message StartScriptResponse {
 message StopScriptsRequest {
   string session_id = 1;
   string api_key = 2;
-  // The run to cancel. Empty cancels every run in this session — the
+  // The run to cancel. Empty cancels every run on the page — the
   // distinction is deliberately explicit, because there is no undo for either.
   string run_id = 3;
+  string page_id = 4;
 }
 
 message StopScriptsResponse {
@@ -1836,6 +2212,7 @@ message ScriptRun {
 message ListScriptRunsRequest {
   string session_id = 1;
   string api_key = 2;
+  string page_id = 3;
 }
 
 message ListScriptRunsResponse {
@@ -1847,9 +2224,10 @@ message ListScriptRunsResponse {
 message StreamScriptEventsRequest {
   string session_id = 1;
   string api_key = 2;
-  // Report only this run. Empty reports every run in the session, which is what
+  // Report only this run. Empty reports every run on the page, which is what
   // a dashboard wants and what a single follower does not.
   string run_id = 3;
+  string page_id = 4;
 }
 
 message ScriptLog {

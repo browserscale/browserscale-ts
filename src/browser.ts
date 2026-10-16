@@ -4,11 +4,23 @@ import { WebSocketTransport } from "./ws-transport.ts";
 // Public API — browser entry point ────────────────────────────────────
 
 export { CloudBrowser } from "./client.ts";
+export { Page } from "./page.ts";
 export { WebSocketTransport } from "./ws-transport.ts";
 export { BrowserConfig } from "./config.ts";
 
 // Locator + constructors + AllFrames sentinel
 export { Locator, css, js, node, at, AllFrames } from "./locator.ts";
+
+// Wait-only conditions (accepted by wait()/waitAny(), not by actions)
+export {
+  CaptchaCondition,
+  RequestCondition,
+  ResponseCondition,
+  captcha,
+  request,
+  response,
+} from "./locator.ts";
+export type { WaitCondition } from "./locator.ts";
 
 // Server-side defaults, re-exported for reference only (all deprecated)
 export {
@@ -27,6 +39,9 @@ export {
   MoveError,
   SelectOptionError,
   WaitError,
+  PageClosedError,
+  PageNotFocusedError,
+  NoPageError,
 } from "./errors.ts";
 
 // Plain user-facing types
@@ -45,6 +60,12 @@ export type {
   NetworkBodyRange,
   NetworkCaptureOptions,
   WaitResult,
+  WaitKind,
+  WaitElementResult,
+  WaitCaptchaResult,
+  WaitRequestResult,
+  WaitResponseResult,
+  WaitElement,
   WaitConditionStatus,
   OccluderInfo,
   ElementRef,
@@ -52,6 +73,8 @@ export type {
   EvaluateResult,
   ElementResult,
   DragResult,
+  CaptchaInterruption,
+  CaptchaAutoSolveOpts,
   SelectOptionResult,
   ScreenshotResult,
   ReadCanvasResult,
@@ -97,6 +120,16 @@ export {
   type ScriptResult,
   type ScriptRunInfo,
 } from "./scripts.ts";
+
+// Context events (pages opening, closing, focus, updates, captcha solves)
+export {
+  ContextEvents,
+  type ContextEvent,
+  type ContextEventHandler,
+  type CaptchaDetectedEvent,
+  type CaptchaResolvedEvent,
+  type ReactionFiredEvent,
+} from "./context-events.ts";
 
 // Network capture (traffic log)
 export { NetworkCapture, type NetworkExchangeHandler } from "./network-capture.ts";
@@ -145,7 +178,7 @@ export type { AuthSession, DbscSession } from "./auth-session.ts";
  *   sessionId,
  *   apiKey,
  * );
- * await browser.navigate("https://example.com");
+ * await page.navigate("https://example.com");
  */
 export function createWebSocketBrowser(
   wsUrl: string,
