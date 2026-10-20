@@ -19,6 +19,7 @@ import {
   GetStorageRequestSchema,
   SetStorageRequestSchema,
   ClearStorageRequestSchema,
+  GetClientIdentityRequestSchema,
   GetAuthSessionRequestSchema,
   SetAuthSessionRequestSchema,
   GetStreamConfigRequestSchema,
@@ -56,10 +57,12 @@ import { ContextEvents, type ContextEventHandler } from "./context-events.ts";
 import type { CookieParam } from "./cookies.ts";
 import type { StorageOriginEntry } from "./storage.ts";
 import type { AuthSession } from "./auth-session.ts";
+import type { ClientIdentity, ClientIdentityOptions } from "./identity.ts";
 import type { ProxyOptions } from "./config.ts";
 import {
   authSessionFromProto,
   authSessionToProto,
+  clientIdentityFromProto,
   cookieParamFromProto,
   cookieParamsToProto,
   headerModsToProto,
@@ -1257,6 +1260,45 @@ export class CloudBrowser {
     if (origin) req.origin = origin;
     const res = await this.client.clearStorage(req);
     throwCommandError("clearStorage", res.error);
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Client identity
+  // ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Returns the session's client identity in one call: the User-Agent, the
+   * full UA client-hint set, the Accept-Language and the session's proxy — so
+   * an out-of-browser HTTP client can continue the session with matching
+   * request headers through the same proxy. With `withCookies` / `withStorage`
+   * the cookies and localStorage are folded into the same response.
+   *
+   * The context configuration is read directly in the browser process, so no
+   * page needs to be open.
+   *
+   * @param opts - optionally fold in cookies / storage
+   *
+   * @returns the session's {@link ClientIdentity}
+   *
+   * Rejects only on a transport failure - a dead session, a page that is gone,
+   * a broken connection. This call has no semantic failure of its own, so there
+   * are no error codes to branch on.
+   *
+   * @example
+   * const id = await browser.getClientIdentity({ withCookies: true });
+   * console.log(id.userAgent, id.proxy.host, id.cookies?.length);
+   */
+  async getClientIdentity(opts: ClientIdentityOptions = {}): Promise<ClientIdentity> {
+    const req = create(GetClientIdentityRequestSchema, {
+      sessionId: this.sessionId,
+      apiKey: this.apiKey,
+    });
+    if (opts.withCookies) req.includeCookies = true;
+    if (opts.withStorage || opts.storageOrigin) req.includeStorage = true;
+    if (opts.storageOrigin) req.storageOrigin = opts.storageOrigin;
+    const resp = await this.client.getClientIdentity(req);
+    throwCommandError("getClientIdentity", resp.error);
+    return clientIdentityFromProto(resp);
   }
 
   // ──────────────────────────────────────────────────────────────────

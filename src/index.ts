@@ -156,6 +156,14 @@ export type { CookieParam } from "./cookies.ts";
 // Storage (localStorage)
 export type { StorageItem, StorageOriginEntry } from "./storage.ts";
 
+// Client identity (reproduce the session out of browser)
+export type {
+  ClientIdentity,
+  ClientIdentityOptions,
+  ProxyConfig,
+  UaBrand,
+} from "./identity.ts";
+
 // Auth / DBSC (portable signed-in persona)
 export type { AuthSession, DbscSession } from "./auth-session.ts";
 

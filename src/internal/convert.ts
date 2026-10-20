@@ -27,6 +27,9 @@ import {
   type CookieParam as ProtoCookieParam,
   type StorageOriginEntry as ProtoStorageOriginEntry,
   type AuthSession as ProtoAuthSession,
+  type ClientIdentity as ProtoClientIdentity,
+  type UaBrand as ProtoUaBrand,
+  type GetClientIdentityResponse as ProtoGetClientIdentityResponse,
   HeaderModificationSchema,
   CookiePartitionKeySchema,
   CookieParamSchema,
@@ -67,6 +70,7 @@ import {
 import type { CookieParam } from "../cookies.ts";
 import type { StorageOriginEntry } from "../storage.ts";
 import type { AuthSession } from "../auth-session.ts";
+import type { ClientIdentity, ProxyConfig, UaBrand } from "../identity.ts";
 import type { HeaderModification, RequestPattern } from "../network.ts";
 import { type Locator, pickFrame } from "../locator.ts";
 import type { Page } from "../page.ts";
@@ -597,6 +601,48 @@ export function storageEntriesToProto(
     });
     return msg;
   });
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Client identity
+// ──────────────────────────────────────────────────────────────────────
+
+function brandsFromProto(bs: ProtoUaBrand[]): UaBrand[] {
+  return bs.map(b => ({ brand: b.brand, version: b.version }));
+}
+
+function proxyFromProto(p: ProtoClientIdentity["proxy"]): ProxyConfig {
+  return {
+    scheme: p?.scheme ?? "",
+    host: p?.host ?? "",
+    port: p?.port ?? 0,
+    username: p?.username ?? "",
+    password: p?.password ?? "",
+    masque: p?.masque ?? "",
+  };
+}
+
+export function clientIdentityFromProto(
+  resp: ProtoGetClientIdentityResponse,
+): ClientIdentity {
+  const p = resp.identity;
+  const out: ClientIdentity = {
+    userAgent: p?.userAgent ?? "",
+    acceptLanguage: p?.acceptLanguage ?? "",
+    platform: p?.platform ?? "",
+    platformVersion: p?.platformVersion ?? "",
+    architecture: p?.architecture ?? "",
+    bitness: p?.bitness ?? "",
+    model: p?.model ?? "",
+    mobile: p?.mobile ?? false,
+    wow64: p?.wow64 ?? false,
+    brands: brandsFromProto(p?.brands ?? []),
+    fullVersionList: brandsFromProto(p?.fullVersionList ?? []),
+    proxy: proxyFromProto(p?.proxy),
+  };
+  if (resp.cookies.length > 0) out.cookies = resp.cookies.map(cookieParamFromProto);
+  if (resp.storage.length > 0) out.storage = resp.storage.map(storageEntryFromProto);
+  return out;
 }
 
 // ──────────────────────────────────────────────────────────────────────

@@ -105,6 +105,11 @@ service Browser {
   rpc SetStorage(SetStorageRequest) returns (CommandResult);
   rpc ClearStorage(ClearStorageRequest) returns (CommandResult);
 
+  // One call that returns the context's client identity (User-Agent, UA client
+  // hints, Accept-Language, proxy) and optionally its cookies and localStorage
+  // — everything needed to continue the session out of browser.
+  rpc GetClientIdentity(GetClientIdentityRequest) returns (GetClientIdentityResponse);
+
   // Auth / DBSC (portable signed-in persona)
   rpc GetAuthSession(GetAuthSessionRequest) returns (GetAuthSessionResponse);
   rpc SetAuthSession(SetAuthSessionRequest) returns (CommandResult);
@@ -1508,6 +1513,75 @@ message ClearStorageRequest {
   string api_key = 2;
   // If set, only this origin's storage is deleted; otherwise all origins.
   optional string origin = 3;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Client identity (for building matching out-of-browser requests)
+// ──────────────────────────────────────────────────────────────────────
+
+// One brand/version pair of the User-Agent client hints (Sec-CH-UA family).
+// For `brands` the version is the significant (major) version; for
+// `full_version_list` it is the full version.
+message UaBrand {
+  string brand = 1;
+  string version = 2;
+}
+
+// The context's proxy, as configured by createContext/setProxy. An empty host
+// means a direct connection. browserscale-net uses scheme/host/port and
+// credentials; `masque` (HTTP/3) is carried for completeness.
+message ProxyConfig {
+  // "http" (also when empty) or "socks5".
+  string scheme = 1;
+  string host = 2;
+  int32 port = 3;
+  string username = 4;
+  string password = 5;
+  // "host:port" of a MASQUE proxy carrying HTTP/3, or empty.
+  string masque = 6;
+}
+
+// Everything the browser reports about itself on the wire, so an out-of-browser
+// HTTP client can reproduce matching request headers.
+message ClientIdentity {
+  string user_agent = 1;
+  string accept_language = 2;
+  string platform = 3;
+  string platform_version = 4;
+  string architecture = 5;
+  string bitness = 6;
+  string model = 7;
+  bool mobile = 8;
+  bool wow64 = 9;
+  repeated UaBrand brands = 10;
+  repeated UaBrand full_version_list = 11;
+  ProxyConfig proxy = 12;
+}
+
+message GetClientIdentityRequest {
+  string session_id = 1;
+  string api_key = 2;
+  // Include the context's cookies in the response.
+  optional bool include_cookies = 3;
+  // Include the context's localStorage in the response.
+  optional bool include_storage = 4;
+  // With include_storage, restrict to this origin (e.g. "https://example.com").
+  optional string storage_origin = 5;
+}
+
+message GetClientIdentityResponse {
+  // Always true today: this command has no semantic failure of its own.
+  bool success = 1;
+  // The context's client identity.
+  ClientIdentity identity = 2;
+  // Present only when include_cookies was set.
+  repeated CookieParam cookies = 3;
+  // Present only when include_storage was set.
+  repeated StorageOriginEntry storage = 4;
+  // Carried for shape only: no code is defined for this command, so it is
+  // always absent. Declared so a caller written against the uniform result
+  // needs no special case here, and so a future failure mode is an added code.
+  optional CommandError error = 5;
 }
 
 // ──────────────────────────────────────────────────────────────────────
