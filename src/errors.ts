@@ -102,9 +102,12 @@ export class ClickError extends BrowserScaleError {
   /**
    * Machine-stable failure code, e.g. `"occluded_no_reachable_point"` (target
    * fully covered, no exposed part reachable), `"occluded_after_evade"` (a
-   * reposition was tried but the target was still covered), `"not_found"` or
-   * `"captcha_failed"` (a captcha appeared during the click and auto-solve
-   * could not solve it, with `onFailure: "fail"`).
+   * reposition was tried but the target was still covered), `"not_found"`,
+   * `"not_visible"` (found but not rendered, visibility:hidden or clipped
+   * away, so nothing covers it; a selector's first match is often a hidden
+   * copy, such as the one in a closed mobile menu) or `"captcha_failed"` (a
+   * captcha appeared during the click and auto-solve could not solve it, with
+   * `onFailure: "fail"`).
    */
   readonly code: string;
   /** The intercepting element (present for occlusion codes). */
@@ -142,7 +145,7 @@ export class ClickError extends BrowserScaleError {
 
 /**
  * FillError is thrown by {@link Page.fill} when the field could not be
- * focused/typed. The click-phase codes (`"not_found"`,
+ * focused/typed. The click-phase codes (`"not_found"`, `"not_visible"`,
  * `"occluded_no_reachable_point"`, `"occluded_after_evade"`) mirror the
  * underlying focus click, with diagnostics under `clickError`. The focus codes
  * are `"focus_stolen"` (another element took focus — `focusedElement` names it;
@@ -294,6 +297,38 @@ export class SelectOptionError extends BrowserScaleError {
     this.name = "SelectOptionError";
     this.code = init.code;
     this.result = init.result;
+  }
+}
+
+/**
+ * SolveCaptchaError is thrown by {@link Page.solveCaptcha} when the challenge
+ * was not solved.
+ */
+export class SolveCaptchaError extends BrowserScaleError {
+  /**
+   * `"not_found"` (no challenge waiting for an answer appeared; one that
+   * passed on its own does not count), `"unsupported"` (one was found that
+   * cannot be solved yet), `"solve_failed"` (it did not clear within
+   * `retryAmount` rounds), `"blocked"` (it was answered and the site replied
+   * with a block; solving again in this session will not help), `"timeout"`,
+   * `"page_closed"` or `"cancelled"` (a navigation of the page started during
+   * the solve).
+   */
+  readonly code: string;
+  /**
+   * The type of challenge found, a short stable name such as `"turnstile"`;
+   * empty when none was.
+   */
+  readonly kind: string;
+  /** The solve's id in the `captchaDetected` / `captchaResolved` events; empty when no solve ran. */
+  readonly solveId: string;
+
+  constructor(init: { code: string; message: string; kind: string; solveId: string }) {
+    super(formatMessage("solveCaptcha", init.kind ? `${init.code} (${init.kind})` : init.code, init.message));
+    this.name = "SolveCaptchaError";
+    this.code = init.code;
+    this.kind = init.kind;
+    this.solveId = init.solveId;
   }
 }
 

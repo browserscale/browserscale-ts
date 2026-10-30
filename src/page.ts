@@ -53,6 +53,7 @@ import {
   BrowserScaleError,
   CommandError,
   PageNotFocusedError,
+  SolveCaptchaError,
   focusedPageIdOf,
   throwCommandError,
   type ClickError,
@@ -1695,13 +1696,30 @@ export class Page {
    * its outcome instead of starting a second one. A solve this call starts is
    * reported on {@link CloudBrowser.contextEvents} with trigger `"command"`.
    *
-   * Rejects when no captcha appeared within `timeoutMs`, or when the one
-   * that did could not be solved within `retryAmount` attempts. Neither
-   * carries a code: solving runs outside your code, so there is no
-   * per-command code set here.
+   * @throws {@link SolveCaptchaError} - the challenge was not solved, with a
+   *   `code` and, when one was found, its `kind`:
+   * @throws not_found - no challenge waiting for an answer appeared within
+   *   `timeoutMs`. One that passed on its own does not count, so the page may
+   *   simply be through
+   * @throws unsupported - a challenge was found that cannot be solved yet
+   * @throws solve_failed - the solver answered it and it did not clear within
+   *   `retryAmount` rounds
+   * @throws blocked - it was answered and the site replied with a block
+   *   instead of letting the visitor through; solving again in this session
+   *   will not help
+   * @throws timeout - `timeoutMs` ran out while the solver was at it
+   * @throws page_closed - the page closed during the solve
+   * @throws cancelled - a navigation of the page started during the solve
    *
    * @example
-   * await page.solveCaptcha({ retryAmount: 2 });
+   * try {
+   *   await page.solveCaptcha({ retryAmount: 2 });
+   * } catch (e) {
+   *   if (e instanceof SolveCaptchaError && e.code === "blocked") {
+   *     // start over in a fresh session
+   *   }
+   *   throw e;
+   * }
    */
   async solveCaptcha(opts?: { timeoutMs?: number; retryAmount?: number }): Promise<string> {
     const resp = await this.client.solveCaptcha(
@@ -1711,8 +1729,17 @@ export class Page {
         apiKey: this.apiKey,
         timeoutMs: opts?.timeoutMs ?? 0,
         retryAmount: opts?.retryAmount ?? 0,
+        reportFailure: true,
       }),
     );
+    if (resp.error) {
+      throw new SolveCaptchaError({
+        code: resp.error.code,
+        message: resp.error.message,
+        kind: resp.kind,
+        solveId: resp.solveId ?? "",
+      });
+    }
     return resp.result;
   }
 

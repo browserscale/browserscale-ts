@@ -342,11 +342,20 @@ export interface WaitElementResult extends WaitResultBase {
 }
 
 /**
- * A {@link captcha} condition matched. It carries no payload — solve it with
+ * A {@link captcha} condition matched. Solve it with
  * {@link Page.solveCaptcha}.
  */
 export interface WaitCaptchaResult extends WaitResultBase {
   kind: "captcha";
+  captcha: WaitCaptcha;
+}
+
+/** The challenge a {@link captcha} wait condition matched. */
+export interface WaitCaptcha {
+  /** The type of challenge, a short stable name such as `"turnstile"`. */
+  kind: string;
+  /** The frame the challenge was found in. */
+  frameId: string;
 }
 
 /** A {@link request} condition matched. */

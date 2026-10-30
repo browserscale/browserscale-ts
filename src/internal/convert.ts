@@ -348,7 +348,11 @@ export function unwrapWait(r: ProtoWaitResult): WaitResult {
         },
       };
     case "captcha":
-      return { ...base, kind: "captcha" };
+      return {
+        ...base,
+        kind: "captcha",
+        captcha: { kind: r.captcha?.kind ?? "", frameId: r.captcha?.frameId ?? "" },
+      };
     case "request": {
       const request = interceptedRequestFromProto(r.request);
       if (request) return { ...base, kind: "request", request };

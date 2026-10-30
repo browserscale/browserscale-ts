@@ -52,6 +52,8 @@ export interface CaptchaDetectedEvent {
   solveId: string;
   /** The frame the challenge was found in. */
   frameId: string;
+  /** The type of challenge, a short stable name such as `"turnstile"`. */
+  captchaKind: string;
   /** What found it: `"auto"` (auto-solve) or `"command"` ({@link Page.solveCaptcha}). */
   trigger: "auto" | "command";
   /**
@@ -85,7 +87,9 @@ export interface CaptchaResolvedEvent {
   /** What `interruptedCommand` does now; see {@link CaptchaInterruption.outcome}. */
   interruptedOutcome?: CaptchaInterruption["outcome"];
   /**
-   * Present iff `success` is false. Codes: `"solve_failed"`, `"timeout"`,
+   * Present iff `success` is false. Codes: `"solve_failed"`, `"blocked"` (the
+   * challenge was answered and the site replied with a block; solving again
+   * in this session will not help), `"timeout"`,
    * `"limit_reached"`, `"page_closed"`, `"disabled"` (auto-solve was disabled
    * before the solve started) and `"cancelled"` (a navigation of the page
    * started during the solve).
@@ -110,8 +114,9 @@ export interface ReactionFiredEvent {
   interruptedCommand?: string;
   /**
    * Present iff `success` is false, with the click's code: `"not_found"` (the
-   * click target was gone), `"occluded_no_reachable_point"`,
-   * `"occluded_after_evade"` (something covered it) or `"failed"`. A failed
+   * click target was gone), `"not_visible"` (it hid again),
+   * `"occluded_no_reachable_point"`, `"occluded_after_evade"` (something
+   * covered it) or `"failed"`. A failed
    * reaction is used up like one that clicked.
    */
   error?: { code: string; message: string };
@@ -243,6 +248,7 @@ function contextEventFromProto(
         page: page(d.pageId),
         solveId: d.solveId,
         frameId: d.frameId,
+        captchaKind: d.kind,
         trigger: d.trigger as CaptchaDetectedEvent["trigger"],
         state: d.state as CaptchaDetectedEvent["state"],
       };

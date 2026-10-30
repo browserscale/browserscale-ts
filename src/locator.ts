@@ -345,11 +345,13 @@ export type WaitCondition = Locator | CaptchaCondition | RequestCondition | Resp
 
 /**
  * captcha matches as soon as a supported captcha or bot-protection
- * challenge is on the page.
+ * challenge is on the page and waits for an answer. A widget that passed, or
+ * passes without interaction, does not count.
  *
  * It is a state, like {@link css}: a challenge that is already showing
- * matches at once. On a match the result's `kind` is `"captcha"`; hand the
- * page to {@link Page.solveCaptcha} to solve it.
+ * matches at once. On a match the result's `kind` is `"captcha"` and its
+ * `captcha` names the kind of challenge; hand the page to
+ * {@link Page.solveCaptcha} to solve it.
  *
  * Most challenges live in an iframe, so a wait containing captcha() searches
  * every frame — its element conditions included — unless a locator pins a

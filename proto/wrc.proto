@@ -387,6 +387,8 @@ message CaptchaDetectedEvent {
   // The command running on the page when the captcha appeared ("click",
   // "fill", ...), which is held until the solve ends.
   optional string interrupted_command = 6;
+  // The type of challenge, a short stable name such as "turnstile".
+  string kind = 7;
 }
 
 // A solve announced by CaptchaDetectedEvent ended.
@@ -414,7 +416,9 @@ message CaptchaResolvedEvent {
   //     with code "captcha_failed".
   optional string interrupted_outcome = 7;
   // Present iff success is false. Codes: "solve_failed" (the challenge did
-  // not clear), "timeout" (solve_timeout_ms passed), "limit_reached" (see
+  // not clear), "blocked" (it was answered and the site replied with a block;
+  // solving again in this session will not help), "timeout"
+  // (solve_timeout_ms passed), "limit_reached" (see
   // captcha_detected.state), "page_closed" (the page closed), "disabled"
   // (auto-solve was disabled before the solve started), "cancelled" (a
   // Navigate or LoadHTML of the page started during the solve).
@@ -437,8 +441,8 @@ message ReactionFiredEvent {
   // which carried on after it.
   optional string interrupted_command = 5;
   // Present iff success is false. Codes as for Click: "not_found",
-  // "occluded_no_reachable_point", "occluded_after_evade"; or "failed" if the
-  // click could not be carried out at all.
+  // "not_visible", "occluded_no_reachable_point", "occluded_after_evade"; or
+  // "failed" if the click could not be carried out at all.
   optional CommandError error = 6;
 }
 
@@ -548,15 +552,23 @@ message WaitElementMatch {
   Rect bounds = 4;
 }
 
+// The challenge a captcha condition matched.
+message WaitCaptchaMatch {
+  // The type of challenge, a short stable name such as "turnstile".
+  string kind = 1;
+  // The frame the challenge was found in.
+  string frame_id = 2;
+}
+
 message WaitResult {
   int32 index = 1;
   // What matched: "element", "captcha", "request" or "response". Empty when
-  // nothing matched. Exactly the field of that name below is set (a captcha
-  // match carries no payload).
+  // nothing matched. Exactly the field of that name below is set.
   string kind = 8;
   WaitElementMatch element = 9;
   InterceptedRequest request = 10;
   InterceptedResponse response = 11;
+  WaitCaptchaMatch captcha = 12;
   // False iff nothing matched before the deadline. Redundant with index -1, and
   // carried anyway so every command answers the same question the same way.
   bool success = 7;
@@ -668,7 +680,8 @@ message CommandResult {
 // success is false. CommandError plus the occlusion specifics.
 message ClickError {
   // Machine-stable failure code, e.g. "occluded_no_reachable_point" or
-  // "occluded_after_evade". "captcha_failed": a captcha held the click and
+  // "occluded_after_evade". "not_visible": the target was found but cannot be
+  // seen, so nothing covers it. "captcha_failed": a captcha held the click and
   // could not be solved (see EnableCaptchaAutoSolve on_failure).
   string code = 1;
   string message = 2;
@@ -821,8 +834,9 @@ message ElementRef {
 }
 
 message FillError {
-  // "not_found", "occluded_no_reachable_point", "occluded_after_evade"
-  // (mirrored from the underlying focus click; diagnostics under click_error),
+  // "not_found", "not_visible", "occluded_no_reachable_point",
+  // "occluded_after_evade" (mirrored from the underlying focus click;
+  // diagnostics under click_error),
   // "focus_stolen" (another element took focus; focused_element names it),
   // "focus_lost" (focus left the target and nothing is focused) or
   // "captcha_failed" (a captcha held the fill and could not be solved).
@@ -2104,6 +2118,10 @@ message SolveCaptchaRequest {
   // Retry the solve flow this many times before giving up.
   int32 retry_amount = 4;
   string page_id = 5;
+  // Report a solve that did not succeed in the response (success false,
+  // error set) instead of as an RPC error. The SDKs set it; a client that
+  // leaves it unset gets an RPC error, as it always did.
+  bool report_failure = 6;
 }
 
 message SolveCaptchaResponse {
@@ -2111,6 +2129,27 @@ message SolveCaptchaResponse {
   // Empty on success — most challenges are completed in-page server-side
   // and require no further action from the caller. Empty on failure too.
   string result = 1;
+  // Whether the challenge was solved. Only meaningful with report_failure.
+  bool success = 2;
+  // The type of challenge found, a short stable name such as "turnstile".
+  // Empty when none was found.
+  string kind = 3;
+  // The solve's id in captcha_detected / captcha_resolved. Absent when no
+  // solve ran.
+  optional string solve_id = 4;
+  // Present iff success is false (with report_failure). Codes:
+  //   "not_found": no challenge waiting for an answer appeared within
+  //     timeout_ms. One that passed on its own does not count.
+  //   "unsupported": a challenge was found that cannot be solved yet.
+  //   "solve_failed": the solver answered it and it did not clear within
+  //     retry_amount rounds.
+  //   "blocked": it was answered and the site replied with a block instead
+  //     of letting the visitor through. Solving again in this session will
+  //     not help.
+  //   "timeout": timeout_ms ran out while the solver was at it.
+  //   "page_closed": the page closed during the solve.
+  //   "cancelled": a navigation of the page started during the solve.
+  optional CommandError error = 5;
 }
 
 message EnableCaptchaAutoSolveRequest {
