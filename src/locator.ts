@@ -182,6 +182,15 @@ export class Locator {
 /**
  * css waits for / targets an element matching the given CSS selector.
  *
+ * Where the element has to be visible (a wait condition or reaction, and every
+ * action), the selector means its first rendered match: matches that are not
+ * rendered at all (display:none, visibility:hidden, no size) are passed over,
+ * so a hidden copy such as the one in a closed mobile menu does not shadow the
+ * visible element. A covered or offscreen match is still rendered and stays
+ * the target. When a later match was taken, the result says which one in
+ * `selectorMatch`. With `.visible(false)` a wait or reaction takes the first
+ * match.
+ *
  * When used in {@link Page.wait}/{@link Page.waitAny}, the
  * condition requires the element to be visible and to hold still for 500ms
  * before it matches — the API's defaults for a condition that does not set

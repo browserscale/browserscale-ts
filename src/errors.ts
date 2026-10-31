@@ -104,8 +104,9 @@ export class ClickError extends BrowserScaleError {
    * fully covered, no exposed part reachable), `"occluded_after_evade"` (a
    * reposition was tried but the target was still covered), `"not_found"`,
    * `"not_visible"` (found but not rendered, visibility:hidden or clipped
-   * away, so nothing covers it; a selector's first match is often a hidden
-   * copy, such as the one in a closed mobile menu) or `"captcha_failed"` (a
+   * away, so nothing covers it; a {@link css} selector already passes over
+   * matches that are not rendered, so with several matches none of them is)
+   * or `"captcha_failed"` (a
    * captcha appeared during the click and auto-solve could not solve it, with
    * `onFailure: "fail"`).
    */

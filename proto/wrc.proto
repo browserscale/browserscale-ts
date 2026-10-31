@@ -544,12 +544,30 @@ message WaitCondition {
   WaitNetworkCondition response = 7;
 }
 
+// Which of a CSS selector's matches a command took, when it was not simply the
+// first. Where an element has to be visible (wait and reactions with visible,
+// and every action), a selector means its first rendered match: matches that
+// are not rendered at all (display:none, visibility:hidden, no size) are passed
+// over, so a hidden copy such as the one in a closed mobile menu does not
+// shadow the visible element. A covered or offscreen match is still rendered
+// and stays the target. Reported only when the selector matched more than one
+// element and the command looked past the first: on a later match it took, or,
+// with index 0, when none of them is rendered.
+message SelectorMatch {
+  // 0-based position among the selector's matches in document order.
+  int32 index = 1;
+  // How many elements the selector matched.
+  int32 count = 2;
+}
+
 // The element an element condition matched.
 message WaitElementMatch {
   string frame_id = 1;
   int32 backend_node_id = 2;
   bool is_visible = 3;
   Rect bounds = 4;
+  // Set when the selector's match was not simply its first.
+  optional SelectorMatch selector_match = 5;
 }
 
 // The challenge a captcha condition matched.
@@ -592,6 +610,9 @@ message WaitConditionStatus {
   optional Rect bounds = 6;
   // The intercepting element, present iff state == "found_occluded".
   optional OccluderInfo occluder = 7;
+  // Set when the selector matched several elements and the status is about
+  // one other than the first, or none of them is rendered.
+  optional SelectorMatch selector_match = 8;
 }
 
 // Error detail for WaitForAny. Present in WaitResult iff no condition matched
@@ -708,6 +729,8 @@ message ClickResult {
   // The captcha solves that held the click, in order (see
   // EnableCaptchaAutoSolve). Empty if none did.
   repeated CaptchaInterruption captchas = 9;
+  // Set when the selector's target was not simply its first match.
+  optional SelectorMatch selector_match = 10;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -871,6 +894,8 @@ message FillResult {
   optional FillError error = 8;
   // The captcha solves that held the fill, in order. Empty if none did.
   repeated CaptchaInterruption captchas = 9;
+  // Set when the selector's target was not simply its first match.
+  optional SelectorMatch selector_match = 10;
 }
 
 message DragResult {
@@ -884,6 +909,8 @@ message DragResult {
   optional DragError error = 8;
   // The captcha solves that held the drag, in order. Empty if none did.
   repeated CaptchaInterruption captchas = 9;
+  // Set when the source selector's target was not simply its first match.
+  optional SelectorMatch selector_match = 10;
 }
 
 // Error detail for a Drag whose source pickup failed. Present in DragResult iff
@@ -925,6 +952,8 @@ message ScrollResult {
   bool is_visible = 4;
   Rect bounds = 5;
   optional ScrollError error = 8;
+  // Set when the selector's target was not simply its first match.
+  optional SelectorMatch selector_match = 9;
 }
 
 // Error detail for a ScrollTo that failed. Present iff success is false; the
@@ -947,6 +976,8 @@ message MoveResult {
   double root_x = 6;
   double root_y = 7;
   optional MoveError error = 8;
+  // Set when the selector's target was not simply its first match.
+  optional SelectorMatch selector_match = 9;
 }
 
 // Error detail for a MoveTo that failed. Present iff success is false; a move

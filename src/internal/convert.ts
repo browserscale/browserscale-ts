@@ -15,6 +15,7 @@ import {
   type ClickError as ProtoClickError,
   type OccluderInfo as ProtoOccluderInfo,
   type ElementRef as ProtoElementRef,
+  type SelectorMatch as ProtoSelectorMatch,
   type WaitConditionStatus as ProtoWaitConditionStatus,
   type FrameInfo as ProtoFrameInfo,
   type PageInfo as ProtoPageInfo,
@@ -53,6 +54,7 @@ import type {
   PageInfo,
   Rect,
   SelectOptionResult,
+  SelectorMatch,
   SessionUsage,
   WaitConditionStatus,
   WaitResult,
@@ -133,6 +135,7 @@ interface ElementLike {
   success: boolean;
   frameId: string;
   backendNodeId: number;
+  selectorMatch?: ProtoSelectorMatch;
 }
 
 function elementResult(
@@ -142,7 +145,7 @@ function elementResult(
   rootX: number,
   rootY: number,
 ): ElementResult {
-  return {
+  const res: ElementResult = {
     success: r.success,
     frameId: r.frameId,
     backendNodeId: r.backendNodeId,
@@ -151,6 +154,14 @@ function elementResult(
     rootX,
     rootY,
   };
+  const selectorMatch = selectorMatchFromProto(r.selectorMatch);
+  if (selectorMatch) res.selectorMatch = selectorMatch;
+  return res;
+}
+
+function selectorMatchFromProto(m?: ProtoSelectorMatch): SelectorMatch | undefined {
+  if (!m) return undefined;
+  return { index: m.index, count: m.count };
 }
 
 function occluderFromProto(o?: ProtoOccluderInfo): OccluderInfo | undefined {
@@ -289,6 +300,8 @@ export function unwrapDrag(r: ProtoDragResult): DragResult {
   };
   const captchas = captchasFromProto(r.captchas);
   if (captchas) res.captchas = captchas;
+  const selectorMatch = selectorMatchFromProto(r.selectorMatch);
+  if (selectorMatch) res.selectorMatch = selectorMatch;
   if (!r.success && r.error) {
     throw new DragError({
       code: r.error.code,
@@ -322,6 +335,7 @@ function waitConditionStatusFromProto(c: ProtoWaitConditionStatus): WaitConditio
     isVisible: c.isVisible,
     bounds: c.bounds ? rectFromProto(c.bounds) : undefined,
     occluder: occluderFromProto(c.occluder),
+    selectorMatch: selectorMatchFromProto(c.selectorMatch),
   };
 }
 
@@ -345,6 +359,9 @@ export function unwrapWait(r: ProtoWaitResult): WaitResult {
           backendNodeId: r.element?.backendNodeId ?? 0,
           isVisible: r.element?.isVisible ?? false,
           bounds: rectFromProto(r.element?.bounds),
+          ...(r.element?.selectorMatch && {
+            selectorMatch: selectorMatchFromProto(r.element.selectorMatch),
+          }),
         },
       };
     case "captcha":

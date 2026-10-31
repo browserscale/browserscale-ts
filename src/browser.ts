@@ -69,6 +69,7 @@ export type {
   WaitElement,
   WaitCaptcha,
   WaitConditionStatus,
+  SelectorMatch,
   OccluderInfo,
   ElementRef,
   NavigateResult,

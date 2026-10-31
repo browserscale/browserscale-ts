@@ -383,6 +383,31 @@ export interface WaitElement {
   isVisible: boolean;
   /** The element's rect in root-viewport CSS pixels. */
   bounds: Rect;
+  /**
+   * Set when a {@link css} condition matched an element other than the
+   * selector's first match.
+   */
+  selectorMatch?: SelectorMatch;
+}
+
+/**
+ * Which of a CSS selector's matches a call took when it was not simply the
+ * first.
+ *
+ * Where an element has to be visible (a {@link css} wait condition or reaction,
+ * and every action), a selector means its first rendered match: matches that
+ * are not rendered at all (display:none, visibility:hidden, no size) are passed
+ * over, so a hidden copy such as the one in a closed mobile menu does not
+ * shadow the visible element. A covered or offscreen match is still rendered
+ * and stays the target. Set only when the selector matched several elements
+ * and the call looked past the first: on a later match it took, or, with
+ * `index` 0, when none of them is rendered.
+ */
+export interface SelectorMatch {
+  /** 0-based position among the selector's matches in document order. */
+  index: number;
+  /** How many elements the selector matched. */
+  count: number;
 }
 
 /**
@@ -481,6 +506,11 @@ export interface WaitConditionStatus {
   bounds?: Rect;
   /** The intercepting element, present iff state === `"found_occluded"`. */
   occluder?: OccluderInfo;
+  /**
+   * Set when the selector matched several elements and this status is about
+   * one other than the first, or none of them is rendered.
+   */
+  selectorMatch?: SelectorMatch;
 }
 
 /** NavigateResult reports where a {@link Page.navigate} call ended up after redirects. */
@@ -534,6 +564,11 @@ export interface ElementResult {
    * Absent if none did, and always absent for the other actions.
    */
   captchas?: CaptchaInterruption[];
+  /**
+   * Set when a {@link css} target resolved to other than the selector's first
+   * match.
+   */
+  selectorMatch?: SelectorMatch;
 }
 
 /**
@@ -550,6 +585,11 @@ export interface DragResult {
   endY: number;
   /** The captcha solves that held the drag, in order. Absent if none did. */
   captchas?: CaptchaInterruption[];
+  /**
+   * Set when a {@link css} source resolved to other than the selector's first
+   * match.
+   */
+  selectorMatch?: SelectorMatch;
 }
 
 /**
