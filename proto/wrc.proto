@@ -120,6 +120,7 @@ service Browser {
   rpc GetObservation(GetObservationRequest) returns (GetObservationResponse);
   rpc InspectAtPosition(InspectAtPositionRequest) returns (InspectAtPositionResponse);
   rpc HighlightNode(HighlightNodeRequest) returns (CommandResult);
+  rpc GetNodeRef(GetNodeRefRequest) returns (GetNodeRefResponse);
 
   // DOM mirror — an incremental view of the page's DOM, as ONE tree.
   // StartDomMirror returns the top of the main document and from then on the
@@ -242,6 +243,84 @@ message FrameInfo {
   Rect absolute_rect = 7;
   Rect relative_rect = 8;
   repeated FrameInfo children = 9;
+  // The frame's name (its iframe's name attribute), when it has one. What a
+  // Container's frame_name goes by.
+  string name = 10;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Where a command looks
+// ──────────────────────────────────────────────────────────────────────
+
+// One step of the way to where a command looks for its element. A command
+// that takes a target (selector, js_expression or ref) also takes `in`, a list
+// of these, outermost first: each one narrows where the next is looked for,
+// and the target is looked for in what the last one leaves.
+//
+// selector, js_expression and ref name an element. If that element holds a
+// document of its own (an iframe, cross-origin or not), the scope becomes that
+// document. Any other element makes its own subtree the scope, and for a
+// shadow host that includes its shadow tree, open or closed. Inside an element
+// scope an expression gets the element as __wrc.scope and has to return an
+// element inside it.
+//
+// frame_url and frame_name name a frame below the scope so far, frame_id one
+// frame wherever it is, main the main document. A frame a person can see is
+// preferred over one that is display:none or has no size.
+//
+// Without `in`, a selector is looked for on the whole page: the main document
+// first, then every frame in tree order, frames nobody can see last. An
+// expression runs in the main document only; `any` is how to ask for every
+// frame.
+//
+// A chain is walked anew on every look a command takes, so a command that
+// waits for its element (Click, Fill, Drag, WaitForAny, a reaction) also waits
+// for the frames and elements on the way to it.
+message Container {
+  oneof link {
+    // An element, by CSS selector: its first rendered match in the scope so
+    // far.
+    string selector = 1;
+    // An element, by expression. Runs in the document the scope so far is in
+    // (the main document at the start of a chain).
+    string js_expression = 2;
+    // An element, by the reference an earlier result gave for it.
+    string ref = 3;
+    // A frame below the scope so far whose document URL matches this wildcard
+    // pattern ("*" spans any characters).
+    string frame_url = 4;
+    // A frame below the scope so far with this name.
+    string frame_name = 5;
+    // This frame, by the id a result or GetPages reported.
+    string frame_id = 6;
+    // The main document.
+    bool main = 7;
+    // Every frame of the scope so far, itself included, one after the other.
+    // Only after a frame or at the start of a chain.
+    bool any = 8;
+  }
+  // With selector, js_expression or ref: the element has to hold a document
+  // of its own. One that is any other element is not taken as a subtree; the
+  // link then counts as leading nowhere ("container_not_found").
+  bool frame = 9;
+}
+
+// The frame an element was found in.
+//
+// Results name the element a command found with a `ref` and this `frame`. The
+// ref names that very element. Pass it as a command's `ref` (or as
+// Container.ref) to act on the element again without looking it up; no frame
+// has to be named with it. It stays good while the element is in its
+// document. Once the document was replaced by a navigation, or the element
+// removed, a command given it fails with code "stale_ref" instead of acting
+// on whatever took its place.
+message FrameRef {
+  // Usable as Container.frame_id. Stable across navigations of the frame.
+  string frame_id = 1;
+  // URL of the document the frame shows.
+  string url = 2;
+  // Whether it is the page's main frame.
+  bool main = 3;
 }
 
 message PageInfo {
@@ -409,7 +488,7 @@ message CaptchaResolvedEvent {
   //     of its text, a click goes for its target again).
   //   "restarted": the solve replaced the document, so it starts over (a fill
   //     locates its field again and types the whole text; one that targeted
-  //     a backend_node_id fails instead, the node is gone).
+  //     a ref fails instead with "stale_ref", the element is gone).
   //   "continued": the solve failed and on_failure is "continue": the command
   //     carries on as if it had succeeded.
   //   "failed": the solve failed and on_failure is "fail": the command ends
@@ -538,10 +617,17 @@ message WaitCondition {
   optional string js_expression = 2;
   optional bool visible = 3;
   optional double steady_time = 4;
-  // Any supported captcha / bot-protection challenge, in any frame.
+  // Any supported captcha / bot-protection challenge, in every frame of the
+  // condition's scope: the whole page unless `in` narrows it.
   bool captcha = 5;
   WaitNetworkCondition request = 6;
   WaitNetworkCondition response = 7;
+  // Where this condition looks (see Container). Each condition has its own
+  // scope: without it, a selector or captcha is looked for on the whole page
+  // and an expression runs in the main document, whatever the other
+  // conditions of the call say. A condition inside a frame that does not
+  // exist yet waits for the frame too. Not for request / response.
+  repeated Container in = 8;
 }
 
 // Which of a CSS selector's matches a command took, when it was not simply the
@@ -562,8 +648,11 @@ message SelectorMatch {
 
 // The element an element condition matched.
 message WaitElementMatch {
-  string frame_id = 1;
-  int32 backend_node_id = 2;
+  // Reference to the element (see FrameRef); empty when an expression matched
+  // with a truthy value that is not an element.
+  string ref = 1;
+  // The frame the element (or the truthy value) was found in.
+  FrameRef frame = 2;
   bool is_visible = 3;
   Rect bounds = 4;
   // Set when the selector's match was not simply its first.
@@ -575,7 +664,7 @@ message WaitCaptchaMatch {
   // The type of challenge, a short stable name such as "turnstile".
   string kind = 1;
   // The frame the challenge was found in.
-  string frame_id = 2;
+  FrameRef frame = 2;
 }
 
 message WaitResult {
@@ -604,7 +693,10 @@ message WaitConditionStatus {
   // "not_found" | "found_hidden" | "found_occluded" | "pending_steady" |
   // "not_seen" (request / response conditions: nothing matching happened).
   string state = 2;
-  int32 backend_node_id = 3;
+  // Reference to the element last seen for this condition; empty if it was
+  // never found or the match was not an element.
+  string ref = 3;
+  // Frame it was last seen in (empty if never found).
   string frame_id = 4;
   bool is_visible = 5;
   optional Rect bounds = 6;
@@ -613,6 +705,10 @@ message WaitConditionStatus {
   // Set when the selector matched several elements and the status is about
   // one other than the first, or none of them is rendered.
   optional SelectorMatch selector_match = 8;
+  // Set when the condition could not even be looked for at the last look,
+  // because a link of its `in` chain led nowhere: which link, and what was
+  // missing. state is "not_found" then.
+  optional string scope_error = 9;
 }
 
 // Error detail for WaitForAny. Present in WaitResult iff no condition matched
@@ -632,8 +728,8 @@ message WaitError {
 
 message ElementResult {
   bool success = 1;
-  string frame_id = 2;
-  int32 backend_node_id = 3;
+  string ref = 2;
+  FrameRef frame = 3;
   bool is_visible = 4;
   Rect bounds = 5;
   double root_x = 6;
@@ -644,7 +740,11 @@ message ElementResult {
 // of the target at the intended click point. Coordinates are root-viewport CSS
 // pixels, consistent with ClickResult.bounds.
 message OccluderInfo {
-  int32 backend_node_id = 1;
+  // Reference to the intercepting element: pass it as a command's `ref` to
+  // act on it, or as a Container to look for its close button inside it.
+  string ref = 1;
+  // The frame it lives in, which may differ from the target's (a page-level
+  // modal covering a frame).
   string frame_id = 2;
   string tag_name = 3;
   optional string id = 4;
@@ -704,6 +804,14 @@ message ClickError {
   // "occluded_after_evade". "not_visible": the target was found but cannot be
   // seen, so nothing covers it. "captcha_failed": a captcha held the click and
   // could not be solved (see EnableCaptchaAutoSolve on_failure).
+  //
+  // Where the target is looked for, every command that takes one can also
+  // answer: "container_not_found" (a link of `in` led nowhere for the whole
+  // timeout; the message names the link and what was missing), "stale_ref"
+  // (the ref, as the target or as a link of `in`, names an element whose
+  // document was replaced or that was removed; returned at once, find the
+  // element anew) and "outside_scope" (an expression confined to an element
+  // by `in` returned an element outside it).
   string code = 1;
   string message = 2;
   // The intercepting element (present for occlusion codes).
@@ -719,8 +827,10 @@ message ClickError {
 // when success is false. A failed click is a normal response, not an RPC error.
 message ClickResult {
   bool success = 1;
-  string frame_id = 2;
-  int32 backend_node_id = 3;
+  // Reference to the element that was clicked, and the frame it was found in
+  // (see FrameRef). Empty for a click at coordinates.
+  string ref = 2;
+  FrameRef frame = 3;
   bool is_visible = 4;
   Rect bounds = 5;
   double root_x = 6;
@@ -750,8 +860,9 @@ message ReactionInfo {
   optional string action_selector = 4;
   // Click-target JS expression, if the action targets a different element.
   optional string action_js_expression = 5;
-  // Frame scope: a specific frameId, empty for the main frame, or "ALL_FRAMES".
-  string frame_id = 6;
+  // Where the match is looked for (see Container), as given to AddReaction.
+  // Empty: a selector on the whole page, an expression in the main document.
+  repeated Container in = 6;
   // Whether the match additionally requires the element to be visible.
   bool visible = 7;
   // Registered for every page (AddReaction without page_id) rather than for
@@ -770,9 +881,10 @@ message AddReactionRequest {
   // Exactly one of match_selector / match_js_expression must be set.
   optional string match_selector = 4;
   optional string match_js_expression = 5;
-  // Where to watch: a specific frameId, empty/omitted for the main frame, or
-  // "ALL_FRAMES" to watch every frame.
-  optional string frame_id = 6;
+  // Where to watch (see Container). Empty: a selector is watched for on the
+  // whole page, every frame included; an expression runs in the main
+  // document.
+  repeated Container in = 6;
   // Require the matched element to be visible before firing.
   optional bool visible = 7;
   // Optional click-target CSS selector, resolved in the matched element's
@@ -841,7 +953,9 @@ message ListReactionsResponse {
 // identify it (and decide what to do) without another DOM round-trip. Used to
 // name the element that stole focus in a fill focus-loss failure.
 message ElementRef {
-  int32 backend_node_id = 1;
+  // Reference to the element, usable as a command's `ref`. It lives in the
+  // same frame as the fill target.
+  string ref = 1;
   // Upper-case tag name, e.g. "INPUT", "BUTTON", "DIV".
   string tag_name = 2;
   optional string id = 3;
@@ -887,8 +1001,9 @@ message FillError {
 // fill's contract.
 message FillResult {
   bool success = 1;
-  string frame_id = 2;
-  int32 backend_node_id = 3;
+  // Reference to the field, and the frame it was found in (see FrameRef).
+  string ref = 2;
+  FrameRef frame = 3;
   double root_x = 6;
   double root_y = 7;
   optional FillError error = 8;
@@ -900,8 +1015,10 @@ message FillResult {
 
 message DragResult {
   bool success = 1;
-  string frame_id = 2;
-  int32 backend_node_id = 3;
+  // Reference to the dragged element, and the frame it was found in (see
+  // FrameRef).
+  string ref = 2;
+  FrameRef frame = 3;
   double start_x = 4;
   double start_y = 5;
   double end_x = 6;
@@ -930,6 +1047,9 @@ message SelectOptionResult {
   string selected_text = 3;
   bool success = 4;
   optional SelectOptionError error = 5;
+  // Reference to the <select>, and the frame it was found in (see FrameRef).
+  string ref = 6;
+  FrameRef frame = 7;
 }
 
 // Error detail for a SelectOption that failed. Present iff success is false.
@@ -947,8 +1067,9 @@ message SelectOptionError {
 // ElementResult so it stays wire-compatible; scrollTo returns no root_x/root_y.
 message ScrollResult {
   bool success = 1;
-  string frame_id = 2;
-  int32 backend_node_id = 3;
+  // Reference to the element, and the frame it was found in (see FrameRef).
+  string ref = 2;
+  FrameRef frame = 3;
   bool is_visible = 4;
   Rect bounds = 5;
   optional ScrollError error = 8;
@@ -969,8 +1090,10 @@ message ScrollError {
 // ElementResult so it stays wire-compatible.
 message MoveResult {
   bool success = 1;
-  string frame_id = 2;
-  int32 backend_node_id = 3;
+  // Reference to the element, and the frame it was found in (see FrameRef).
+  // Empty for a move to coordinates.
+  string ref = 2;
+  FrameRef frame = 3;
   bool is_visible = 4;
   Rect bounds = 5;
   double root_x = 6;
@@ -1115,18 +1238,21 @@ message EvaluateRequest {
   string api_key = 2;
   string page_id = 3;
   string expression = 4;
-  // Specific frameId or empty/omitted for main frame.
-  // ALL_FRAMES is not supported here.
-  optional string frame_id = 5;
+  // Where the expression runs (see Container): the document the chain leads
+  // to, with __wrc.scope set when it ends at an element. Empty: the main
+  // document. A chain has to lead to one document, so `any` is not for here.
+  repeated Container in = 5;
 }
 
 message EvaluateResponse {
   // JSON-serialized result. Empty for DOM elements or unserializable values.
   string result = 1;
-  // Non-zero if the expression returned a DOM element.
-  int32 backend_node_id = 2;
+  // Set if the expression returned a DOM element: a reference to it.
+  string ref = 2;
   bool is_visible = 3;
   Rect bounds = 4;
+  // The frame the expression ran in.
+  FrameRef frame = 7;
   // False iff the expression never produced a value (then error is present).
   // An expression that answers falsy is a success, so a broken expression is
   // never mistaken for a false one.
@@ -1144,26 +1270,31 @@ message WaitForAnyParams {
   string session_id = 1;
   string api_key = 2;
   string page_id = 3;
+  // Each condition says where it looks (WaitCondition.in).
   repeated WaitCondition conditions = 4;
-  // Specific frameId, empty/omitted for main frame, or "ALL_FRAMES".
-  optional string frame_id = 5;
   optional double timeout = 6;
+  reserved 5;  // was frame_id, one scope for the whole call
 }
 
 // ──────────────────────────────────────────────────────────────────────
 // Element actions (click, fill, select, scroll, move, drag)
 // ──────────────────────────────────────────────────────────────────────
+//
+// Each takes its target as exactly one of ref, selector or js_expression
+// (Click and MoveTo also x + y), and `in` for where to look (see Container).
+// Without `in` a selector is looked for on the whole page, every frame
+// included, and an expression runs in the main document. A ref names its
+// element and frame by itself.
 
 message SelectOptionRequest {
   string session_id = 1;
   string api_key = 2;
   string page_id = 3;
 
-  optional int32 backend_node_id = 4;
+  optional string ref = 4;
   optional string selector = 5;
   optional string js_expression = 6;
-  // Specific frameId, empty/omitted for main frame, or "ALL_FRAMES".
-  optional string frame_id = 7;
+  repeated Container in = 7;
 
   // Exactly one of index / value / text must be set.
   optional int32 index = 8;
@@ -1179,10 +1310,10 @@ message ScrollToRequest {
   string api_key = 2;
   string page_id = 3;
 
-  optional int32 backend_node_id = 4;
+  optional string ref = 4;
   optional string selector = 5;
   optional string js_expression = 6;
-  optional string frame_id = 7;
+  repeated Container in = 7;
 }
 
 message MoveToRequest {
@@ -1190,10 +1321,10 @@ message MoveToRequest {
   string api_key = 2;
   string page_id = 3;
 
-  optional int32 backend_node_id = 4;
+  optional string ref = 4;
   optional string selector = 5;
   optional string js_expression = 6;
-  optional string frame_id = 7;
+  repeated Container in = 7;
 
   // Use instead of element locators.
   optional double x = 8;
@@ -1205,10 +1336,10 @@ message ClickRequest {
   string api_key = 2;
   string page_id = 3;
 
-  optional int32 backend_node_id = 4;
+  optional string ref = 4;
   optional string selector = 5;
   optional string js_expression = 6;
-  optional string frame_id = 7;
+  repeated Container in = 7;
 
   // "left" (default), "right", or "middle".
   optional string button = 8;
@@ -1226,10 +1357,10 @@ message DragRequest {
   string api_key = 2;
   string page_id = 3;
 
-  optional int32 backend_node_id = 4;
+  optional string ref = 4;
   optional string selector = 5;
   optional string js_expression = 6;
-  optional string frame_id = 7;
+  repeated Container in = 7;
 
   // Offset from pickup point OR absolute root-viewport coordinates.
   optional double offset_x = 8;
@@ -1243,10 +1374,10 @@ message FillRequest {
   string api_key = 2;
   string page_id = 3;
 
-  optional int32 backend_node_id = 4;
+  optional string ref = 4;
   optional string selector = 5;
   optional string js_expression = 6;
-  optional string frame_id = 7;
+  repeated Container in = 7;
 
   string text = 8;
   // Clear existing content (Ctrl+A, Delete) before typing. Default false,
@@ -1728,19 +1859,17 @@ message GetObservationRequest {
   optional bool include_bounds = 8;
   // Only emit elements intersecting the frame's current viewport.
   optional bool viewport_only = 9;
-  // Scope root by backend node ID from a previous wait/getObservation.
-  // Requires frame_id. At most one of backend_node_id, selector, js_expression.
-  // Omit all three for the whole page.
-  optional int32 backend_node_id = 10;
+  // Scope root by the reference an earlier result or observation gave. At
+  // most one of ref, selector, js_expression; omit all three and `in` for
+  // the whole page.
+  optional string ref = 10;
   // Scope root by CSS selector.
   optional string selector = 11;
-  // Scope root by JS expression that evaluates to a DOM Element
-  // (including __wrc.shadow(...) for closed shadow roots).
+  // Scope root by JS expression that evaluates to a DOM Element.
   optional string js_expression = 12;
-  // Where to look up the scope root: a specific frameId, empty/omitted for
-  // the main frame, or "ALL_FRAMES" to search every frame until found.
-  // Ignored when observing the whole page.
-  optional string frame_id = 13;
+  // Where the scope root is looked for (see Container). Given alone, what the
+  // chain leads to is the scope: a frame's document, or an element's subtree.
+  repeated Container in = 13;
 }
 
 message GetObservationResponse {
@@ -1976,15 +2105,48 @@ message InspectAtPositionResponse {
   // way, and so a future failure mode is an added code, not a new shape.
   bool success = 7;
   optional CommandError error = 8;
+  // The element as a reference, for acting on it (the target of a click or
+  // fill, or a link of `in`), and the frame it lives in. Empty / absent when
+  // nothing was found. backend_node_id and frame_id above are the same
+  // element in the DOM mirror's terms.
+  string ref = 9;
+  FrameRef frame = 10;
+}
+
+// Turns the address of a DOM mirror node, its backend_node_id and the frame
+// it lives in, into a reference that the target commands take.
+message GetNodeRefRequest {
+  string session_id = 1;
+  string api_key = 2;
+  string page_id = 3;
+  int32 backend_node_id = 4;
+  // The frame the mirror reported the node in. Omitted: the main frame.
+  optional string frame_id = 5;
+}
+
+message GetNodeRefResponse {
+  // The reference. It names the node in the document its frame shows now;
+  // one made from an id of before a resync fails with code "stale_ref" when
+  // it is used.
+  string ref = 1;
+  FrameRef frame = 2;
+  bool success = 3;
+  // Present iff success is false. Codes:
+  //   "not_found" - the frame is not on the page any more.
+  optional CommandError error = 4;
 }
 
 message HighlightNodeRequest {
   string session_id = 1;
   string api_key = 2;
   string page_id = 3;
-  // <= 0 clears all highlights.
+  // A node of the DOM mirror, by the ids the mirror gave it. <= 0 (and no
+  // ref) clears all highlights.
   int32 backend_node_id = 4;
   optional string frame_id = 5;
+  // An element by the reference a result gave for it; wins over the two
+  // above. One whose document is gone fails with code "stale_ref".
+  optional string ref = 6;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -2092,17 +2254,17 @@ message ScreenshotResponse {
 
 // ReadCanvas reads the pixels of a <canvas> directly in the renderer, bypassing
 // the origin-clean (tainted) security check and without executing page JS.
-// Cross-origin/tainted canvases read fine. Targeted like click: by
-// backendNodeId (preferred), CSS selector, or JS expression.
+// Cross-origin/tainted canvases read fine. Targeted like click: by ref, CSS
+// selector or JS expression, with `in` for where to look.
 message ReadCanvasRequest {
   string session_id = 1;
   string api_key = 2;
   string page_id = 3;
 
-  optional int32 backend_node_id = 4;
+  optional string ref = 4;
   optional string selector = 5;
   optional string js_expression = 6;
-  optional string frame_id = 7;
+  repeated Container in = 7;
 
   // Output format: "png" (default), "jpeg", "webp", or "rgba" for the raw
   // unencoded RGBA pixel buffer.
@@ -2120,10 +2282,10 @@ message ReadCanvasRequest {
 message ReadCanvasResponse {
   // Whether a <canvas> was found and read.
   bool success = 1;
-  // The frameId that contained the canvas.
-  string frame_id = 2;
-  // Backend node ID of the canvas that was read.
-  int32 backend_node_id = 3;
+  // Reference to the canvas that was read, and the frame it was found in
+  // (see FrameRef).
+  string ref = 2;
+  FrameRef frame = 3;
   // Encoded image bytes as base64 (png/jpeg/webp), or the raw RGBA buffer as
   // base64 when format is "rgba".
   string data_base64 = 4;

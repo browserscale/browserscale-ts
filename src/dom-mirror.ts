@@ -1,4 +1,5 @@
 import type { DomEvent } from "./gen/wrc_pb.ts";
+import type { Locator } from "./locator.ts";
 
 /**
  * A node in the mirrored page, in CDP's `DOM.Node` shape — the same shape
@@ -122,6 +123,7 @@ export interface DomMirrorTransport {
     backendNodeId: number,
     frameId: string,
   ): Promise<{ path: string; seq: number }>;
+  nodeRef(backendNodeId: number, frameId: string): Promise<Locator>;
 }
 
 type SlotKind = "children" | "shadowRoots";
@@ -269,6 +271,26 @@ export class DomMirror {
   /** Looks up a node by its address. */
   getNode(frameId: string, backendNodeId: number): DomNode | undefined {
     return this.nodes.get(keyOf(frameId, backendNodeId));
+  }
+
+  /**
+   * Turns a mirror node into a reference that {@link Page.click},
+   * {@link Page.fill} and every other call with a target takes: the way to
+   * act on a node picked in the tree. See {@link Page.nodeRef}, which this
+   * calls with the node's address.
+   *
+   * @param node - a node of this mirror
+   *
+   * @returns Locator naming the node, usable as a target or a container
+   *
+   * @throws not_found - the node's frame is not on the page any more
+   *
+   * @example
+   * const button = await mirror.locator(node);
+   * await page.click(button);
+   */
+  async locator(node: DomNode): Promise<Locator> {
+    return this.transport.nodeRef(node.backendNodeId, node.frameId || this.mainFrame);
   }
 
   /**

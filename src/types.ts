@@ -1,6 +1,7 @@
 // Plain user-facing types. These mirror browserscale-go/types.go field-for-field;
 // only naming convention differs (camelCase here, PascalCase in Go).
 
+import type { Locator } from "./locator.ts";
 import type { Page } from "./page.ts";
 
 /** Rect describes a position and size in CSS pixels. */
@@ -11,10 +12,22 @@ export interface Rect {
   height: number;
 }
 
-/** FrameInfo describes a single frame within a page's frame tree. */
+/**
+ * FrameInfo describes a single frame within a page's frame tree, as
+ * {@link Page.frames} and {@link CloudBrowser.pages} report it.
+ *
+ * To act in a frame, hand its id to {@link frameById}:
+ * `css("button.pay").in(frameById(f.frameId))`. {@link walkFrames} visits a
+ * frame and everything below it.
+ */
 export interface FrameInfo {
   frameId: string;
   url: string;
+  /**
+   * The frame's name (its iframe's name attribute), empty when it has none.
+   * What {@link frameName} goes by.
+   */
+  name: string;
   isOOPIF: boolean;
   hasJSContext: boolean;
   isLoading: boolean;
@@ -22,6 +35,52 @@ export interface FrameInfo {
   absoluteRect: Rect;
   relativeRect: Rect;
   children: FrameInfo[];
+}
+
+/**
+ * Calls fn for a frame and every frame below it, parents before their
+ * children, in the order the frames appear in their documents. It stops as
+ * soon as fn returns false.
+ *
+ * @param frame - where to start, usually what {@link Page.frames} returned
+ * @param fn - called with each frame and its depth below the start (0 for
+ *   the start itself); return false to stop
+ *
+ * @example
+ * const frames = await page.frames();
+ * walkFrames(frames, (f, depth) => {
+ *   console.log("  ".repeat(depth) + f.url, f.name);
+ * });
+ */
+export function walkFrames(
+  frame: FrameInfo,
+  fn: (frame: FrameInfo, depth: number) => boolean | void,
+): void {
+  const walk = (f: FrameInfo, depth: number): boolean => {
+    if (fn(f, depth) === false) return false;
+    for (const c of f.children) {
+      if (!walk(c, depth + 1)) return false;
+    }
+    return true;
+  };
+  walk(frame, 0);
+}
+
+/**
+ * FrameRef is the frame an element was found in. Every result that names an
+ * element carries one, so a call that searched the whole page says where its
+ * element lives.
+ */
+export interface FrameRef {
+  /**
+   * The frame's id, usable with {@link frameById}. It stays the same across
+   * navigations of the frame.
+   */
+  id: string;
+  /** The URL of the document the frame showed when the element was found. */
+  url: string;
+  /** Whether it is the page's main frame. */
+  main: boolean;
 }
 
 /**
@@ -221,8 +280,9 @@ export interface NetworkExchange {
   /** Bytes kept for the request body. */
   requestBodySize: number;
   /**
-   * Part of the request body is missing: it hit the per-body cap, or it was a
-   * file or streamed upload, which are not kept.
+   * Part of the request body is missing: it hit the per-body cap, or its
+   * source failed before all of it was read. File and streamed uploads are
+   * kept like any other body.
    */
   requestBodyTruncated: boolean;
 
@@ -355,7 +415,7 @@ export interface WaitCaptcha {
   /** The type of challenge, a short stable name such as `"turnstile"`. */
   kind: string;
   /** The frame the challenge was found in. */
-  frameId: string;
+  frame: FrameRef;
 }
 
 /** A {@link request} condition matched. */
@@ -372,13 +432,18 @@ export interface WaitResponseResult extends WaitResultBase {
 
 /** The element a {@link css} or {@link js} wait condition matched. */
 export interface WaitElement {
-  /** The frame the element lives in. */
-  frameId: string;
   /**
-   * Addresses the element in later calls via {@link node}; 0 when a js()
-   * expression matched with a truthy non-Element value.
+   * Names the matched element: pass it to any action to act on exactly this
+   * element, or to {@link Locator.in} to look inside it. No frame has to be
+   * named with it. Undefined when a js() expression matched with a truthy
+   * value that is not an element. See {@link ref} for how long it stays good.
    */
-  backendNodeId: number;
+  ref?: Locator;
+  /**
+   * The frame the element lives in (for a non-element match, the frame the
+   * expression ran in).
+   */
+  frame: FrameRef;
   /** Whether the element was visible at the match. */
   isVisible: boolean;
   /** The element's rect in root-viewport CSS pixels. */
@@ -418,7 +483,16 @@ export interface SelectorMatch {
  * button).
  */
 export interface OccluderInfo {
-  backendNodeId: number;
+  /**
+   * Names the blocker itself: pass it to {@link Page.click} to click it, or to
+   * {@link Locator.in} to look for its close button inside it. Undefined when
+   * it could not be named.
+   */
+  ref?: Locator;
+  /**
+   * The frame the blocker lives in, which may differ from the target's (a
+   * page-level modal covering an iframe).
+   */
   frameId: string;
   tagName: string;
   id: string;
@@ -456,12 +530,16 @@ export interface OccluderInfo {
 }
 
 /**
- * ElementRef is a lightweight descriptor of an element — enough to identify it
- * (and decide what to do) without another DOM round-trip. It names the element
- * that stole focus in a {@link FillError} focus-loss failure.
+ * FocusedElement is a lightweight descriptor of an element — enough to
+ * identify it (and decide what to do) without another DOM round-trip. It names
+ * the element that stole focus in a {@link FillError} focus-loss failure.
  */
-export interface ElementRef {
-  backendNodeId: number;
+export interface FocusedElement {
+  /**
+   * Names the element, ready to pass to an action such as {@link Page.click}.
+   * Undefined when it could not be named.
+   */
+  ref?: Locator;
   /** Upper-case tag name, e.g. "INPUT", "BUTTON", "DIV". */
   tagName: string;
   /** id attribute, if present. */
@@ -496,10 +574,20 @@ export interface WaitConditionStatus {
    * saw a matching request.
    */
   state: string;
-  /** backendNodeId last seen for this condition (0 if never found). */
-  backendNodeId: number;
+  /**
+   * Names the element last seen for this condition; undefined if it was never
+   * found or the match was not an element.
+   */
+  ref?: Locator;
   /** frameId where it was last seen (empty if never found). */
   frameId: string;
+  /**
+   * Set when the condition could not even be looked for at the last look,
+   * because a container given with {@link Locator.in} led nowhere: it says
+   * which link of the chain, and what was missing. `state` is `"not_found"`
+   * then.
+   */
+  scopeError?: string;
   /** Whether it was CSS-visible at the last observation. */
   isVisible: boolean;
   /** Last known rect in root-viewport coordinates (undefined if never found). */
@@ -522,7 +610,7 @@ export interface NavigateResult {
 /**
  * EvaluateResult carries the outcome of a JS evaluate call.
  *
- * If the expression returned a DOM element, backendNodeId/isVisible/bounds
+ * If the expression returned a DOM element, ref/isVisible/bounds
  * are populated and value is null. Otherwise value holds the parsed JSON
  * value (string/number/boolean/array/object/null). On parse failure value
  * falls back to the raw server string so the caller is never empty-handed.
@@ -539,7 +627,13 @@ export interface EvaluateResult<T = unknown> {
    */
   success: boolean;
   value: T;
-  backendNodeId: number;
+  /**
+   * Names the element the expression returned, ready to pass to an action or
+   * to {@link Locator.in}; undefined when it returned anything else.
+   */
+  ref?: Locator;
+  /** The frame the expression ran in. */
+  frame: FrameRef;
   isVisible: boolean;
   bounds: Rect;
 }
@@ -552,8 +646,18 @@ export interface EvaluateResult<T = unknown> {
  */
 export interface ElementResult {
   success: boolean;
-  frameId: string;
-  backendNodeId: number;
+  /**
+   * Names the element the call acted on: pass it to a later action to act on
+   * exactly this element again, or to {@link Locator.in} to look inside it.
+   * Undefined for a call that was given coordinates ({@link at}). See
+   * {@link ref} for how long it stays good.
+   */
+  ref?: Locator;
+  /**
+   * The frame the element was found in. A {@link css} target is looked for on
+   * the whole page, so this is where to read which frame it was.
+   */
+  frame: FrameRef;
   isVisible: boolean;
   bounds: Rect;
   rootX: number;
@@ -577,8 +681,12 @@ export interface ElementResult {
  */
 export interface DragResult {
   success: boolean;
-  frameId: string;
-  backendNodeId: number;
+  /**
+   * Names the dragged element, and `frame` the frame it was found in; as in
+   * {@link ElementResult}.
+   */
+  ref?: Locator;
+  frame: FrameRef;
   startX: number;
   startY: number;
   endX: number;
@@ -647,6 +755,12 @@ export interface SelectOptionResult {
   selectedIndex: number;
   selectedValue: string;
   selectedText: string;
+  /**
+   * Names the `<select>`, and `frame` the frame it was found in; as in
+   * {@link ElementResult}.
+   */
+  ref?: Locator;
+  frame: FrameRef;
 }
 
 /**
@@ -669,8 +783,12 @@ export interface ScreenshotResult {
  */
 export interface ReadCanvasResult {
   success: boolean;
-  frameId: string;
-  backendNodeId: number;
+  /**
+   * Names the canvas that was read, and `frame` the frame it was found in; as
+   * in {@link ElementResult}.
+   */
+  ref?: Locator;
+  frame: FrameRef;
   dataBase64: string;
   width: number;
   height: number;
@@ -689,9 +807,21 @@ export interface DOMResult {
 
 /**
  * InspectResult describes the topmost element hit at viewport-relative
- * (x, y). backendNodeId === 0 means nothing was found at that position.
+ * (x, y). An undefined `ref` (and backendNodeId === 0) means nothing was found
+ * at that position.
  */
 export interface InspectResult {
+  /**
+   * Names the element, ready to pass to an action or to {@link Locator.in},
+   * and `frame` is the frame it lives in.
+   */
+  ref?: Locator;
+  frame: FrameRef;
+  /**
+   * `backendNodeId` and `frameId` are the same element as the DOM mirror
+   * addresses it ({@link DomMirror.getNode}, {@link DomMirror.reveal},
+   * {@link Page.highlightNode}).
+   */
   backendNodeId: number;
   frameId: string;
   tagName: string;
@@ -787,8 +917,13 @@ export interface ReactionInfo {
   actionSelector: string;
   /** Set if the click target differs from the matched element. */
   actionJsExpression: string;
-  /** Frame scope: `""` for the main frame, a specific frameId, or `AllFrames`. */
-  frameId: string;
+  /**
+   * The locator the reaction watches for, as it was given to addReaction: the
+   * selector or expression above together with the container it was put in
+   * with {@link Locator.in}, and its visible setting. Print it with
+   * `String(r.match)` to see where the reaction looks.
+   */
+  match: Locator;
   /** Whether the match additionally requires the element to be visible. */
   visible: boolean;
   /**

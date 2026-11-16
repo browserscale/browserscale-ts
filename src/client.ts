@@ -549,7 +549,7 @@ export class CloudBrowser {
    *
    * @example
    * // Accept the consent banner on whichever page it shows up.
-   * const id = await browser.addReaction(css("button#accept").inAllFrames());
+   * const id = await browser.addReaction(css("button#accept"));
    */
   async addReaction(match: Locator, opts?: ReactionOpts): Promise<string> {
     return addReaction(this.reactionScope(), match, opts);

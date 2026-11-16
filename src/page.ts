@@ -23,6 +23,7 @@ import {
   ReadCanvasRequestSchema,
   InspectAtPositionRequestSchema,
   HighlightNodeRequestSchema,
+  GetNodeRefRequestSchema,
   InsertTextRequestSchema,
   TypeRequestSchema,
   PressKeyRequestSchema,
@@ -52,9 +53,12 @@ import {
 import {
   BrowserScaleError,
   CommandError,
+  PageClosedError,
   PageNotFocusedError,
   SolveCaptchaError,
+  StaleRefError,
   focusedPageIdOf,
+  isStaleRef,
   throwCommandError,
   type ClickError,
   type DragError,
@@ -66,6 +70,7 @@ import type {
   DragResult,
   ElementResult,
   EvaluateResult,
+  FrameInfo,
   InspectResult,
   NavigateResult,
   ScreenshotResult,
@@ -108,8 +113,10 @@ import {
 } from "./dom-mirror.ts";
 import {
   elementFields,
+  frameRefFromProto,
   headersToProto,
   rectFromProto,
+  refLocator,
   unwrapClick,
   unwrapDrag,
   unwrapFill,
@@ -222,12 +229,42 @@ export class Page {
     });
   }
 
-  /** Runs unwrap, rethrowing a not-focused failure as {@link PageNotFocusedError}. */
-  private focusGuard<T>(unwrap: () => T): T {
+  /**
+   * The last step of every call that takes a target: it turns the two
+   * failures that are about the page rather than the element into their own
+   * error types, {@link PageNotFocusedError} and {@link StaleRefError}.
+   */
+  private async checked(target: Locator | undefined, err: unknown): Promise<unknown> {
+    err = this.notFocused(err);
+    if (!isStaleRef(err)) return err;
+    const ref = target?.firstRef();
+    return new StaleRefError({ ref, url: await this.currentUrl(ref), cause: err });
+  }
+
+  /** Runs unwrap, rethrowing what it throws through {@link checked}. */
+  private async guard<T>(target: Locator | undefined, unwrap: () => T): Promise<T> {
     try {
       return unwrap();
     } catch (e) {
-      throw this.notFocused(e);
+      throw await this.checked(target, e);
+    }
+  }
+
+  /**
+   * Reads where the frame a reference was seen in is now, falling back to the
+   * page's own URL. Best effort: "" when the page cannot be read.
+   */
+  private async currentUrl(ref: Locator | undefined): Promise<string> {
+    try {
+      const info = (await this.browser.pages()).find((p) => p.page.id === this.id);
+      if (!info) return "";
+      if (ref?.seenIn) {
+        const f = findFrame(info.frameTree, ref.seenIn);
+        if (f) return f.url;
+      }
+      return info.url;
+    } catch {
+      return "";
     }
   }
 
@@ -276,14 +313,16 @@ export class Page {
   }
 
   /**
-   * Serves a synthetic response for the next navigation to url.
+   * Navigates the page to url and serves html as the response.
    *
-   * Registers a one-shot interceptor that intercepts the next request to
-   * url and replies with the supplied html and headers instead of going to
-   * the network. Useful for snapshotted pages, test fixtures, and offline
-   * replays. Pair with {@link navigate} to trigger the load.
+   * The page navigates as with {@link navigate}, but the request for url
+   * never reaches the network: it is answered with the supplied html, headers
+   * and status code. The answer is used once; a later navigation to url, also
+   * a reload, goes to the network again. Useful for snapshotted pages, test
+   * fixtures, and offline replays. It resolves once the response was handed
+   * to the page, so wait for what the next step needs as after a navigation.
    *
-   * @param url - URL pattern that, when navigated to, returns the html
+   * @param url - the URL the page will show the html under
    * @param html - response body to serve
    * @param opts - optional headers and statusCode (default 200)
    *
@@ -295,7 +334,7 @@ export class Page {
    *
    * @example
    * await page.loadHTML("https://example.com", "<h1>hi</h1>");
-   * await page.navigate("https://example.com");
+   * await page.wait(css("h1"));
    */
   async loadHTML(url: string, html: string, opts?: LoadHTMLOpts): Promise<void> {
     const req = create(LoadHTMLRequestSchema, {
@@ -321,8 +360,8 @@ export class Page {
    * The expression's return value is JSON-serialized server-side and
    * parsed eagerly into `.value`. When the expression returns a DOM
    * element the `.value` is null and the element metadata
-   * (backendNodeId, isVisible, bounds) is populated instead — use
-   * {@link node} in subsequent calls to act on it.
+   * (ref, isVisible, bounds) is populated instead — pass the ref to
+   * subsequent calls to act on it.
    *
    * The generic T is a TypeScript hint only — there is no runtime
    * validation that the JS expression actually returned that type.
@@ -357,34 +396,60 @@ export class Page {
    * }
    */
   async evaluate<T = unknown>(expression: string): Promise<EvaluateResult<T>> {
-    return this._evaluate<T>("", expression);
+    return this._evaluate<T>(undefined, expression);
   }
 
   /**
-   * Runs a JavaScript expression in the given frame.
+   * Runs a JavaScript expression inside a container: in the document of a
+   * frame, or scoped to an element.
    *
-   * Same semantics as {@link evaluate} but targets a specific frame
-   * instead of the main frame. Useful for evaluating inside OOPIFs (out-
-   * of-process iframes) found via {@link CloudBrowser.pages}. ALL_FRAMES is not
-   * supported here.
+   * Same semantics as {@link evaluate}, but the expression runs where the
+   * container leads:
+   *   - a frame ({@link frameUrl}, {@link frameName}, {@link frameById}, or a
+   *     {@link css}, {@link js} or reference locator naming an iframe
+   *     element): that frame's document, same-origin or not
+   *   - any other element: the document the element lives in, with the
+   *     element itself available to the expression as `__wrc.scope`
+   *
+   * The container is looked up once, as the page is at that moment; it does
+   * not wait for a frame that is still to come. Use {@link wait} first when
+   * it may not be there yet. The result's `frame` says which frame the
+   * expression ran in.
    *
    * @inheritDoc CloudBrowser.evaluate
-   * @param frameId - id of the frame to evaluate in
+   * @param container - where the expression runs; see {@link Locator.in}
+   *
+   * @throws container_not_found - the container, or one it is itself put in,
+   *   is not on the page; the message names the missing link
+   * @throws outside_scope - the expression returned an element outside the
+   *   element the container confined it to
+   * @throws {@link StaleRefError} - the container is a reference whose element
+   *   is gone
    *
    * @example
-   * const pages = await browser.pages();
-   * const iframeId = pages[0].frameTree.children[0].frameId;
-   * await page.evaluateInFrame(iframeId, "location.href");
+   * const pay = css("iframe[title='Secure payment']");
+   * const title = await page.evaluateIn<string>(pay, "document.title");
+   *
+   * @example
+   * // Scoped to an element: how many rows does this table have?
+   * const rows = await page.evaluateIn<number>(css("table#orders"), "__wrc.scope.rows.length");
    */
-  async evaluateInFrame<T = unknown>(
-    frameId: string,
+  async evaluateIn<T = unknown>(
+    container: Locator,
     expression: string,
   ): Promise<EvaluateResult<T>> {
-    return this._evaluate<T>(frameId, expression);
+    container.validateContainer("evaluateIn");
+    container.validateChain("evaluateIn");
+    if (container.isAnyFrame) {
+      throw new BrowserScaleError(
+        "browserscale.evaluateIn: anyFrame() names every frame, and an expression runs in one; name the frame",
+      );
+    }
+    return this._evaluate<T>(container, expression);
   }
 
   private async _evaluate<T>(
-    frameId: string,
+    container: Locator | undefined,
     expression: string,
   ): Promise<EvaluateResult<T>> {
     const req = create(EvaluateRequestSchema, {
@@ -392,17 +457,20 @@ export class Page {
       pageId: this.id,
       apiKey: this.apiKey,
       expression,
+      in: container ? container.chainWithSelf() : [],
     });
-    if (frameId) req.frameId = frameId;
     const resp = await this.client.evaluate(req);
     // An expression that threw arrives as success=false in the payload, not as a
     // transport error, so it is raised here rather than by the call above.
     if (resp.error) {
-      throw new CommandError({
-        command: "evaluate",
-        code: resp.error.code,
-        message: resp.error.message,
-      });
+      throw await this.checked(
+        container,
+        new CommandError({
+          command: "evaluate",
+          code: resp.error.code,
+          message: resp.error.message,
+        }),
+      );
     }
     let value: T | null = null;
     if (resp.result !== "") {
@@ -412,13 +480,63 @@ export class Page {
         value = resp.result as unknown as T;
       }
     }
-    return {
+    const frame = frameRefFromProto(resp.frame);
+    const out: EvaluateResult<T> = {
       success: resp.success,
       value: value as T,
-      backendNodeId: resp.backendNodeId,
+      frame,
       isVisible: resp.isVisible,
       bounds: rectFromProto(resp.bounds),
     };
+    const ref = refLocator(resp.ref, frame.id);
+    if (ref) out.ref = ref;
+    return out;
+  }
+
+  /**
+   * Returns the page's frame tree: the main frame, and below it every iframe,
+   * nested the way the documents are.
+   *
+   * Each {@link FrameInfo} says what a frame shows (URL, name), where it sits
+   * and whether a person can see it. It is for looking around: to find out
+   * which frames a page has, and what would tell one from the others in a
+   * {@link frameUrl} or {@link frameName}. To act in a frame straight away,
+   * hand its `frameId` to {@link frameById}.
+   *
+   * A frame is not an element, so the tree carries no reference to the iframe
+   * elements. Where the iframe element itself is needed (to click or scroll
+   * it), name it with {@link css} or take it from {@link wait}.
+   *
+   * @returns the FrameInfo of the main frame, with its `children`
+   *
+   * @throws {@link PageClosedError} - the page has closed
+   *
+   * @example
+   * const frames = await page.frames();
+   * walkFrames(frames, (f, depth) => {
+   *   console.log("  ".repeat(depth) + f.url, f.name, f.isVisible);
+   * });
+   */
+  async frames(): Promise<FrameInfo> {
+    const info = (await this.browser.pages()).find((p) => p.page.id === this.id);
+    if (info) {
+      if (info.frameTree?.frameId) return info.frameTree;
+      return {
+        frameId: "",
+        url: info.url,
+        name: "",
+        isOOPIF: false,
+        hasJSContext: false,
+        isLoading: false,
+        isVisible: false,
+        absoluteRect: { x: 0, y: 0, width: 0, height: 0 },
+        relativeRect: { x: 0, y: 0, width: 0, height: 0 },
+        children: [],
+      };
+    }
+    // The page is not among the open ones: it has closed. Say so the way any
+    // other call on it does, with the page that has the focus now.
+    throw new PageClosedError({ pageId: this.id, focusedPage: await this.browser.focusedPage() });
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -471,6 +589,13 @@ export class Page {
    * and `.kind` says which kind it was; narrow on `kind` to reach `element`,
    * `request` or `response`.
    *
+   * Every condition looks where its own locator says, whatever the others
+   * say: a {@link css} condition on the whole page with every frame, a
+   * {@link js} condition in the main document, and either one inside the
+   * container given with {@link Locator.in}. A condition inside a frame that
+   * is not there yet waits for the frame as well. The result names the frame
+   * the match was found in.
+   *
    * Defaults applied automatically:
    *   - timeout: 30000 ms — override via `opts.timeoutMs`
    *   - per-locator visible/steady: `true` / `500` for css() and js()
@@ -478,7 +603,7 @@ export class Page {
    *     flags are no-ops. Override with `.visible(false)` / `.steady(ms)`
    *     on individual locators.
    *
-   * {@link node} and {@link at} are not valid wait conditions — they only
+   * A reference and {@link at} are not valid wait conditions — they only
    * make sense as action targets — and throw at send time.
    *
    * @param conditions - one or more conditions to wait for; must be non-empty
@@ -487,7 +612,8 @@ export class Page {
    * @returns WaitResult for the first matching condition
    *
    * @throws {@link WaitError} - no condition matched before the deadline;
-   *   `.conditions` holds the per-condition breakdown of why each never matched
+   *   `.conditions` holds the per-condition breakdown of why each never
+   *   matched, with a `scopeError` naming a container that was never there
    * @throws {@link BrowserScaleError} - a condition was invalid, or a
    *   server/transport error occurred
    *
@@ -498,6 +624,17 @@ export class Page {
    *   { timeoutMs: 60000 },
    * );
    * if (r.kind === "captcha") await page.solveCaptcha();
+   * else if (r.kind === "element") await page.click(r.element.ref!);
+   *
+   * @example
+   * // Each condition with its own place to look.
+   * const pay = css("iframe[title='Secure payment']");
+   * const r = await page.waitAny([
+   *   css("#order-confirmed"),                 // whole page
+   *   css(".card-error").in(pay),              // only the payment frame
+   *   js("location.pathname === '/declined'"), // the top document
+   *   captcha(),                               // whole page
+   * ]);
    *
    * @example
    * // Start the wait first, then trigger the response it waits for.
@@ -511,7 +648,13 @@ export class Page {
     }
     const pbConds = conditions.map((cond, i) => {
       if (cond instanceof CaptchaCondition) {
-        return create(WaitConditionSchema, { captcha: true });
+        for (let c = cond.container; c; c = c.container) {
+          c.validateContainer(`waitAny: condition ${i}`);
+        }
+        return create(WaitConditionSchema, {
+          captcha: true,
+          in: cond.container ? cond.container.chainWithSelf() : [],
+        });
       }
       if (cond instanceof RequestCondition || cond instanceof ResponseCondition) {
         if (!cond.urlPattern) {
@@ -529,27 +672,17 @@ export class Page {
       }
       if (!cond.selector && !cond.jsExpression) {
         throw new BrowserScaleError(
-          `browserscale.waitAny: condition ${i} has neither selector nor JS expression (node()/at() are not valid wait conditions)`,
+          `browserscale.waitAny: condition ${i} has neither selector nor JS expression (a reference, a frame or at() is not a wait condition; put a css() or js() locator in the frame with in())`,
         );
       }
-      const pc = create(WaitConditionSchema);
+      cond.validateChain(`waitAny: condition ${i}`);
+      const pc = create(WaitConditionSchema, { in: cond.chain() });
       if (cond.selector) pc.selector = cond.selector;
       if (cond.jsExpression) pc.jsExpression = cond.jsExpression;
       if (cond.visibleFlag !== undefined) pc.visible = cond.visibleFlag;
       if (cond.steadyMs !== undefined) pc.steadyTime = cond.steadyMs;
       return pc;
     });
-
-    // Call-level frameId: take from the first locator that has one (Wait
-    // doesn't accept a separate frame override yet — mirrors Go wait.go).
-    // captcha() / request() / response() have no frame of their own.
-    let frameId = "";
-    for (const c of conditions) {
-      if (c instanceof Locator && c.frameId) {
-        frameId = c.frameId;
-        break;
-      }
-    }
 
     const req = create(WaitForAnyParamsSchema, {
       sessionId: this.sessionId,
@@ -559,7 +692,6 @@ export class Page {
       // Left unset unless the caller passed one, so the API applies its default.
       timeout: opts?.timeoutMs,
     });
-    if (frameId) req.frameId = frameId;
 
     return unwrapWait(await this.client.waitForAny(req));
   }
@@ -576,13 +708,13 @@ export class Page {
    * mouseDown+mouseUp at a randomized point inside the element's
    * bounding rect.
    *
-   * For right-click, double-click, press/release-only, or to override
-   * the target frame, pass a `ClickOpts` object as the second argument.
+   * For right-click, double-click or press/release-only, pass a `ClickOpts`
+   * object as the second argument.
    *
    * @param target - locator describing what to click; {@link at} is also valid
    * @param opts - optional click customization; see {@link ClickOpts}
    *
-   * @returns ElementResult with success, resolved frameId, backendNodeId,
+   * @returns ElementResult with success, the element's ref and frame,
    *   post-scroll isVisible, element bounds, and the root-viewport
    *   (rootX, rootY) where the click landed
    *
@@ -591,7 +723,15 @@ export class Page {
    *   `.result` describe the blocker and the resolved coordinates. Code
    *   `"captcha_failed"`: a captcha appeared during the click and was not
    *   solved, with auto-solve set to `onFailure: "fail"`
-   *   ({@link CloudBrowser.enableCaptchaAutoSolve}); `.result.captchas` lists it
+   *   ({@link CloudBrowser.enableCaptchaAutoSolve}); `.result.captchas` lists it.
+   *   Codes `"container_not_found"` (a container given with
+   *   {@link Locator.in} is not on the page; the message names the link of the
+   *   chain that was missing) and `"outside_scope"` (a js() target returned
+   *   an element outside the element it was confined to) are about where the
+   *   target was looked for, and every call with a target has them
+   * @throws {@link StaleRefError} - the target or a container is a reference
+   *   whose element is gone (the call's own error, code `"stale_ref"`, is its
+   *   `cause`)
    * @throws {@link BrowserScaleError} - invalid locator, or a server/transport
    *   error (element not found, frame not found, timeout, page closed)
    *
@@ -612,13 +752,13 @@ export class Page {
       sessionId: this.sessionId,
       pageId: this.id,
       apiKey: this.apiKey,
-      ...elementFields(target, opts?.inFrame),
+      ...elementFields(target),
     });
     if (opts?.button) req.button = opts.button;
     if (opts?.clickCount) req.clickCount = opts.clickCount;
     if (opts?.action) req.action = opts.action;
     const resp = await this.client.click(req);
-    return this.focusGuard(() => unwrapClick(resp));
+    return this.guard(target, () => unwrapClick(resp));
   }
 
   /**
@@ -637,14 +777,18 @@ export class Page {
    * @param text - text to type into the element
    * @param opts - optional fill customization; see {@link FillOpts}
    *
-   * @returns ElementResult with success, resolved frameId, backendNodeId
+   * @returns ElementResult with success, the element's ref and frame
    *   and the root-viewport (rootX, rootY) where the element was clicked
    *
    * @throws {@link FillError} - the field could not be focused/typed; `.code`
    *   and `.clickError` (the underlying click-core failure) describe why. Code
    *   `"captcha_failed"`: a captcha appeared during the fill and was not
    *   solved, with auto-solve set to `onFailure: "fail"`
-   *   ({@link CloudBrowser.enableCaptchaAutoSolve})
+   *   ({@link CloudBrowser.enableCaptchaAutoSolve}). Codes
+   *   `"container_not_found"` and `"outside_scope"`: as in {@link click}
+   * @throws {@link StaleRefError} - the target or a container is a reference
+   *   whose element is gone (the call's own error, code `"stale_ref"`, is its
+   *   `cause`)
    * @throws {@link BrowserScaleError} - invalid locator, or a server/transport
    *   error (element not found, frame not found, timeout, page closed)
    *
@@ -662,13 +806,13 @@ export class Page {
       pageId: this.id,
       apiKey: this.apiKey,
       text,
-      ...elementFields(target, opts?.inFrame),
+      ...elementFields(target),
     });
     if (opts?.clearFirst) req.clearFirst = true;
     if (opts?.timeoutMs !== undefined) req.timeout = opts.timeoutMs;
     if (opts?.steadyMs !== undefined) req.steadyTime = opts.steadyMs;
     const resp = await this.client.fill(req);
-    return this.focusGuard(() => unwrapFill(resp));
+    return this.guard(target, () => unwrapFill(resp));
   }
 
   /**
@@ -680,12 +824,16 @@ export class Page {
    *
    * @param target - locator describing where to move; {@link at} is also valid
    *
-   * @returns ElementResult with the resolved frameId, backendNodeId,
+   * @returns ElementResult with the element's ref and frame,
    *   post-scroll isVisible, element bounds and the root-viewport
    *   (rootX, rootY) where the cursor ended up
    *
    * @throws {@link MoveError} - the target could not be located (`.code` is
-   *   `"not_found"`); `.result` carries the resolved payload
+   *   `"not_found"`, or `"container_not_found"` / `"outside_scope"` as in
+   *   {@link click}); `.result` carries the resolved payload
+   * @throws {@link StaleRefError} - the target or a container is a reference
+   *   whose element is gone (the call's own error, code `"stale_ref"`, is its
+   *   `cause`)
    * @throws {@link BrowserScaleError} - invalid locator or a server/transport error
    *
    * @example
@@ -700,7 +848,7 @@ export class Page {
       ...elementFields(target),
     });
     const resp = await this.client.moveTo(req);
-    return this.focusGuard(() => unwrapMove(resp));
+    return this.guard(target, () => unwrapMove(resp));
   }
 
   /**
@@ -714,11 +862,16 @@ export class Page {
    * @param target - locator describing the element to bring into view;
    *   {@link at} is rejected
    *
-   * @returns ElementResult with the resolved frameId, backendNodeId,
+   * @returns ElementResult with the element's ref and frame,
    *   post-scroll isVisible and the element's bounds after the scroll
    *
    * @throws {@link ScrollError} - the target could not be located/scrolled
-   *   (`.code` is `"not_found"`); `.result` carries the resolved payload
+   *   (`.code` is `"not_found"`, or `"container_not_found"` /
+   *   `"outside_scope"` as in {@link click}); `.result` carries the resolved
+   *   payload
+   * @throws {@link StaleRefError} - the target or a container is a reference
+   *   whose element is gone (the call's own error, code `"stale_ref"`, is its
+   *   `cause`)
    * @throws {@link BrowserScaleError} - invalid locator or a server/transport error
    *
    * @example
@@ -732,7 +885,8 @@ export class Page {
       apiKey: this.apiKey,
       ...elementFields(target),
     });
-    return unwrapScroll(await this.client.scrollTo(req));
+    const resp = await this.client.scrollTo(req);
+    return this.guard(target, () => unwrapScroll(resp));
   }
 
   /**
@@ -748,14 +902,18 @@ export class Page {
    * @param offsetX - horizontal distance to drag, in CSS pixels
    * @param offsetY - vertical distance to drag, in CSS pixels
    *
-   * @returns DragResult with the resolved frameId, backendNodeId and the
+   * @returns DragResult with the element's ref and frame and the
    *   final cursor position (rootX, rootY) where the drop happened
    *
    * @throws {@link DragError} - the source could not be acquired/pressed;
    *   `.code` and `.clickError` describe the underlying click-core failure.
    *   Code `"captcha_failed"`: a captcha appeared during the drag and was not
    *   solved, with auto-solve set to `onFailure: "fail"`
-   *   ({@link CloudBrowser.enableCaptchaAutoSolve})
+   *   ({@link CloudBrowser.enableCaptchaAutoSolve}). Codes
+   *   `"container_not_found"` and `"outside_scope"`: as in {@link click}
+   * @throws {@link StaleRefError} - the target or a container is a reference
+   *   whose element is gone (the call's own error, code `"stale_ref"`, is its
+   *   `cause`)
    * @throws {@link BrowserScaleError} - invalid locator or a server/transport error
    *
    * @example
@@ -779,12 +937,16 @@ export class Page {
    * @param absoluteX - horizontal drop coordinate in the root viewport
    * @param absoluteY - vertical drop coordinate in the root viewport
    *
-   * @returns DragResult with the resolved frameId, backendNodeId and the
+   * @returns DragResult with the element's ref and frame and the
    *   final cursor position (rootX, rootY) where the drop happened
    *
    * @throws {@link DragError} - the source could not be acquired/pressed;
    *   `.code` and `.clickError` describe the underlying click-core failure.
-   *   Code `"captcha_failed"`: as in {@link dragBy}
+   *   Codes `"captcha_failed"`, `"container_not_found"` and
+   *   `"outside_scope"`: as in {@link dragBy}
+   * @throws {@link StaleRefError} - the target or a container is a reference
+   *   whose element is gone (the call's own error, code `"stale_ref"`, is its
+   *   `cause`)
    * @throws {@link BrowserScaleError} - invalid locator or a server/transport error
    *
    * @example
@@ -814,7 +976,7 @@ export class Page {
     if (spec.absoluteX !== undefined) req.absoluteX = spec.absoluteX;
     if (spec.absoluteY !== undefined) req.absoluteY = spec.absoluteY;
     const resp = await this.client.drag(req);
-    return this.focusGuard(() => unwrapDrag(resp));
+    return this.guard(target, () => unwrapDrag(resp));
   }
 
   /**
@@ -836,7 +998,11 @@ export class Page {
    *   selectedValue and selectedText after the change
    *
    * @throws {@link SelectOptionError} - the option could not be selected;
-   *   `.code` is `"not_found"` (no `<select>`) or `"option_not_found"`
+   *   `.code` is `"not_found"` (no `<select>`), `"option_not_found"`, or
+   *   `"container_not_found"` / `"outside_scope"` as in {@link click}
+   * @throws {@link StaleRefError} - the target or a container is a reference
+   *   whose element is gone (the call's own error, code `"stale_ref"`, is its
+   *   `cause`)
    * @throws {@link BrowserScaleError} - invalid locator, or a server/transport
    *   error (frame not found, timeout, page closed)
    *
@@ -901,11 +1067,12 @@ export class Page {
       sessionId: this.sessionId,
       pageId: this.id,
       apiKey: this.apiKey,
-      ...elementFields(target, opts?.inFrame),
+      ...elementFields(target),
     });
     withKey(req);
     if (opts?.fireEvents === false) req.fireEvents = false;
-    return unwrapSelect(await this.client.selectOption(req));
+    const resp = await this.client.selectOption(req);
+    return this.guard(target, () => unwrapSelect(resp));
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -986,26 +1153,31 @@ export class Page {
    * current state afterwards.
    *
    * Each frame opens with header lines carrying the URL, the title and the
-   * scroll position, then one line per visible element:
+   * scroll position, then one line per element a person can see or act on:
    *
    * ```
    * input#email[47] type="email" name="loginId" value="a@b.com" required click "E-Mail"
    * ```
    *
    * It spans every frame, pierces open and closed shadow roots, enumerates
-   * `<select>` options, and reports live form state: `value=` is what is typed
-   * in right now (passwords as a length), `checked=` for boxes. The trailing
-   * quoted string is always the label or text, never the value, so an empty and
-   * a prefilled field stay distinguishable. Because the headers already carry
-   * URL, title and scroll offset, this replaces the usual handful of
-   * {@link evaluate} probes after each step.
+   * `<select>` options, and reports live state: `value=` is what is typed in
+   * right now (passwords as a length), `checked=` for boxes, `expanded=` for
+   * menus and accordions, and flags such as `selected`, `focused`, `disabled`
+   * or `invalid`. The trailing quoted string is always the label or text, never
+   * the value, so an empty and a prefilled field stay distinguishable. An
+   * element that cannot be seen is listed only when it is interactive, with the
+   * reason as `hidden="..."`. When a dialog or a consent layer lies over the
+   * page, a header line `# on top: ...` names it, and its rows carry the flag
+   * `on-top`. Because the headers already carry URL, title and scroll offset,
+   * this replaces the usual handful of {@link evaluate} probes after each step.
    *
-   * On what to do with the result: backendNodeId (the `47` above) is a handle
-   * for this session and can be passed straight to click/fill via
-   * {@link node}. It does not survive a new document, so for anything you write
-   * into a script, target with {@link css} or {@link js} instead — those calls
-   * return the backendNodeId they resolved to, which lets you confirm the
-   * durable anchor hits the element you saw.
+   * On what to do with the result: each frame's header carries a line
+   * `# ref @<document>`, and a row's number (the `47` above) followed by that
+   * suffix is the element's reference: pass it to click/fill via {@link ref}.
+   * It is a handle for this session and does not survive a new document, so
+   * for anything you write into a script, target with {@link css} or
+   * {@link js} instead — those calls return the reference they resolved to,
+   * which lets you confirm the durable anchor hits the element you saw.
    *
    * @param opts - optional format and budget overrides; see {@link GetObservationOpts}
    *
@@ -1014,12 +1186,22 @@ export class Page {
    * @throws not_found - the requested scope root is not on the page, so there
    *   was nothing to observe. Distinct from an observation that comes back
    *   empty, which means the scope exists and holds nothing worth reporting
+   * @throws container_not_found - a container the scope names, or is itself
+   *   put in, is not on the page; the message names the missing link
+   * @throws {@link StaleRefError} - the scope is a reference whose element is
+   *   gone
    *
    * @see {@link CommandError} for reading the code off the rejection
    *
    * @example
    * const obs = await page.getObservation();
    * console.log(obs);
+   *
+   * @example
+   * // Re-read just one form after the first full look.
+   * const form = await page.getObservation({ scope: css("form#register") });
+   * // Only what one frame shows.
+   * const checkout = await page.getObservation({ scope: frameUrl("*checkout.example.com/*") });
    */
   async getObservation(opts?: GetObservationOpts): Promise<string> {
     const req = create(GetObservationRequestSchema, {
@@ -1035,12 +1217,32 @@ export class Page {
     if (opts?.maxTotalTokens !== undefined) req.maxTotalTokens = opts.maxTotalTokens;
     if (opts?.includeBounds !== undefined) req.includeBounds = opts.includeBounds;
     if (opts?.viewportOnly !== undefined) req.viewportOnly = opts.viewportOnly;
-    if (opts?.backendNodeId !== undefined) req.backendNodeId = opts.backendNodeId;
-    if (opts?.selector !== undefined) req.selector = opts.selector;
-    if (opts?.jsExpression !== undefined) req.jsExpression = opts.jsExpression;
-    if (opts?.frameId !== undefined) req.frameId = opts.frameId;
+    const scope = opts?.scope;
+    if (scope) {
+      scope.validateContainer("getObservation");
+      scope.validateChain("getObservation");
+      if (scope.isElement() && !scope.mustBeFrame) {
+        // An element: its subtree, found where the locator says.
+        if (scope.refValue) req.ref = scope.refValue;
+        if (scope.selector) req.selector = scope.selector;
+        if (scope.jsExpression) req.jsExpression = scope.jsExpression;
+        req.in = scope.chain();
+      } else {
+        // A frame: the document the chain leads into.
+        req.in = scope.chainWithSelf();
+      }
+    }
     const resp = await this.client.getObservation(req);
-    throwCommandError("getObservation", resp.error);
+    if (resp.error) {
+      throw await this.checked(
+        scope,
+        new CommandError({
+          command: "getObservation",
+          code: resp.error.code,
+          message: resp.error.message,
+        }),
+      );
+    }
     return resp.observation;
   }
 
@@ -1094,14 +1296,21 @@ export class Page {
    *
    * {@link at} is not a valid target — a real <canvas> element is required.
    *
-   * @param target - locator for the <canvas>; {@link css}, {@link js} or {@link node}
-   * @param opts - optional `format`, `quality`, sub-rectangle and frame
-   *   override; see {@link ReadCanvasOpts}
+   * @param target - locator for the <canvas>; {@link css}, {@link js} or a
+   *   reference
+   * @param opts - optional `format`, `quality` and sub-rectangle; see
+   *   {@link ReadCanvasOpts}
    *
    * @returns ReadCanvasResult with the base64 image in `dataBase64`, the
-   *   canvas `width`/`height`, resolved `frameId`/`backendNodeId` and the
+   *   canvas `width`/`height`, the canvas's `ref` and `frame` and the
    *   `originClean` flag
    *
+   * @throws container_not_found - a container given with {@link Locator.in} is
+   *   not on the page; the message names the link of the chain that was missing
+   * @throws outside_scope - a js() target returned an element outside the
+   *   element it was confined to with {@link Locator.in}
+   * @throws {@link StaleRefError} - the target or a container is a reference
+   *   whose element is gone
    * @throws not_found - no element matched the locator
    * @throws not_element - the expression was truthy but did not yield an element
    * @throws not_readable - the target was found but is not a readable canvas
@@ -1132,7 +1341,7 @@ export class Page {
       sessionId: this.sessionId,
       pageId: this.id,
       apiKey: this.apiKey,
-      ...elementFields(target, opts?.inFrame),
+      ...elementFields(target),
     });
     if (opts?.format !== undefined) req.format = opts.format;
     if (opts?.quality !== undefined) req.quality = opts.quality;
@@ -1144,16 +1353,28 @@ export class Page {
       req.sh = opts.sh;
     }
     const resp = await this.client.readCanvas(req);
-    throwCommandError("readCanvas", resp.error);
-    return {
+    if (resp.error) {
+      throw await this.checked(
+        target,
+        new CommandError({
+          command: "readCanvas",
+          code: resp.error.code,
+          message: resp.error.message,
+        }),
+      );
+    }
+    const frame = frameRefFromProto(resp.frame);
+    const out: ReadCanvasResult = {
       success: resp.success,
-      frameId: resp.frameId,
-      backendNodeId: resp.backendNodeId,
+      frame,
       dataBase64: resp.dataBase64,
       width: resp.width,
       height: resp.height,
       originClean: resp.originClean,
     };
+    const ref = refLocator(resp.ref, frame.id);
+    if (ref) out.ref = ref;
+    return out;
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -1231,6 +1452,7 @@ export class Page {
         children: (id, frameId, depth) => this.getDomChildren(id, frameId, depth),
         release: (id, frameId) => this.releaseDomSubtree(id, frameId),
         reveal: (id, frameId) => this.revealDomNode(id, frameId),
+        nodeRef: (id, frameId) => this.nodeRef(id, frameId),
       },
       options: opts,
       onChange,
@@ -1426,14 +1648,15 @@ export class Page {
    *
    * Mirrors what the live-UI overlay does on hover. Elements with
    * pointer-events:none are skipped — the result is the actual click
-   * target, not the visually-topmost node. A `backendNodeId === 0` in
-   * the result means nothing was found.
+   * target, not the visually-topmost node. An undefined `ref` (and a
+   * `backendNodeId === 0`) in the result means nothing was found.
    *
    * @param x - viewport-relative x in CSS pixels
    * @param y - viewport-relative y in CSS pixels
    *
-   * @returns InspectResult with the resolved backendNodeId, frameId, tag
-   *   name, trimmed textContent, visibility and bounds
+   * @returns InspectResult with the element's ref and frame, its address in
+   *   the DOM mirror (backendNodeId, frameId), tag name, trimmed textContent,
+   *   visibility and bounds
    *
    * Rejects only on a transport failure - a dead session, a page that is gone,
    * a broken connection. This call has no semantic failure of its own, so there
@@ -1442,6 +1665,7 @@ export class Page {
    * @example
    * const r = await page.inspectAtPosition(200, 300);
    * console.log(r.tagName, r.textContent);
+   * if (r.ref) await page.click(r.ref); // act on what is under the point
    */
   async inspectAtPosition(x: number, y: number): Promise<InspectResult> {
     const resp = await this.client.inspectAtPosition(
@@ -1454,7 +1678,9 @@ export class Page {
       }),
     );
     throwCommandError("inspectAtPosition", resp.error);
-    return {
+    const frame = frameRefFromProto(resp.frame);
+    const out: InspectResult = {
+      frame,
       backendNodeId: resp.backendNodeId,
       frameId: resp.frameId,
       tagName: resp.tagName,
@@ -1462,13 +1688,99 @@ export class Page {
       isVisible: resp.isVisible,
       bounds: rectFromProto(resp.bounds),
     };
+    const ref = refLocator(resp.ref, frame.id);
+    if (ref) out.ref = ref;
+    return out;
   }
 
   /**
-   * Paints a debug overlay over the node identified by backendNodeId.
+   * Paints a debug overlay over the element a reference names.
    *
-   * Useful for visual debugging of agent flows — the overlay stays until
-   * the next call. Pass backendNodeId <= 0 to clear any current highlights.
+   * Useful for visual debugging of agent flows: mark what a wait found or
+   * what a click is about to hit. At most one element is marked on the whole
+   * page; the overlay stays until the next call. Pass `null` to clear it. The
+   * overlay is drawn by the browser, not by the page: it changes nothing in
+   * the document and scripts cannot see it.
+   *
+   * @param target - the `ref` of a result (or {@link ref} for one read from an
+   *   observation); `null` clears the highlight
+   *
+   * @throws {@link StaleRefError} - the reference's element is gone
+   *
+   * @example
+   * const found = await page.wait(css("button.submit"));
+   * await page.highlight(found.element.ref!);
+   */
+  async highlight(target: Locator | null): Promise<void> {
+    const req = create(HighlightNodeRequestSchema, {
+      sessionId: this.sessionId,
+      pageId: this.id,
+      apiKey: this.apiKey,
+    });
+    if (target) {
+      if (!target.refValue) {
+        throw new BrowserScaleError(
+          "browserscale.highlight: takes the ref of a result (or null to clear); look the element up with wait() first",
+        );
+      }
+      req.ref = target.refValue;
+    }
+    const res = await this.client.highlightNode(req);
+    if (res.error) {
+      throw await this.checked(
+        target ?? undefined,
+        new CommandError({ command: "highlight", code: res.error.code, message: res.error.message }),
+      );
+    }
+  }
+
+  /**
+   * Turns the address of a DOM mirror node into a reference that
+   * {@link click}, {@link fill} and every other call with a target takes.
+   *
+   * The mirror ({@link mirrorDom}) and {@link getDOM} name a node by its
+   * backendNodeId and the frame it lives in. Actions take a reference
+   * instead, which also names the document, so that a node id can never be
+   * mistaken for a node of whatever the frame shows next. This is the bridge
+   * between the two: the reference names the node in the document its frame
+   * shows now. Whether the node still exists is not checked here; a reference
+   * made from an outdated id rejects with a {@link StaleRefError} when it is
+   * used.
+   *
+   * @param backendNodeId - the node's `DomNode.backendNodeId`
+   * @param frameId - the node's `DomNode.frameId`; empty is the main frame
+   *
+   * @returns Locator naming the node, usable as a target or a container
+   *
+   * @throws not_found - the frame is not on the page any more
+   *
+   * @see {@link CommandError} for reading the code off the rejection
+   * @see {@link DomMirror.locator} for the same from a mirror node
+   *
+   * @example
+   * const button = await page.nodeRef(node.backendNodeId, node.frameId);
+   * await page.click(button);
+   */
+  async nodeRef(backendNodeId: number, frameId: string = ""): Promise<Locator> {
+    const req = create(GetNodeRefRequestSchema, {
+      sessionId: this.sessionId,
+      pageId: this.id,
+      apiKey: this.apiKey,
+      backendNodeId,
+    });
+    if (frameId) req.frameId = frameId;
+    const resp = await this.client.getNodeRef(req);
+    throwCommandError("nodeRef", resp.error);
+    return Locator._ref(resp.ref, resp.frame?.frameId ?? "");
+  }
+
+  /**
+   * Paints a debug overlay over a node of the DOM mirror, identified the way
+   * the mirror identifies it: by backendNodeId and frame. For an element a
+   * result named, use {@link highlight} with its ref.
+   *
+   * The overlay stays until the next call. Pass backendNodeId <= 0 to clear
+   * any current highlights.
    *
    * @param backendNodeId - id of the node to highlight, or <= 0 to clear
    * @param frameId - id of the frame the node lives in; empty string
@@ -1479,7 +1791,7 @@ export class Page {
    * are no error codes to branch on.
    *
    * @example
-   * await page.highlightNode(res.backendNodeId, res.frameId);
+   * await page.highlightNode(node.backendNodeId, node.frameId);
    */
   async highlightNode(backendNodeId: number, frameId: string = ""): Promise<void> {
     const req = create(HighlightNodeRequestSchema, {
@@ -1763,10 +2075,13 @@ export class Page {
    * that covers every page. Each click is reported as a `reactionFired`
    * event on {@link CloudBrowser.contextEvents}.
    *
-   * `match` must be a `css()` or `js()` {@link Locator} — `node()`/`at()` are
-   * rejected. Use `.inAllFrames()` to watch every frame and `.visible(false)`
-   * to opt out of the default visibility gate. Pass a `ReactionOpts` to click a
-   * different target (`on`), change the button/click count, or the poll cadence.
+   * `match` must be a `css()` or `js()` {@link Locator} — a reference and
+   * `at()` are rejected. A css() match is watched for on the whole page, every
+   * frame included, the ones that appear later too; a js() match runs in the
+   * main document. Use {@link Locator.in} to watch one frame or one part of
+   * the page instead, and `.visible(false)` to opt out of the default
+   * visibility gate. Pass a `ReactionOpts` to click a different target
+   * (`on`), change the button/click count, or the poll cadence.
    *
    * @param match - the css()/js() locator to watch for
    * @param opts - optional reaction customization; see {@link ReactionOpts}
@@ -1778,7 +2093,12 @@ export class Page {
    *
    * @example
    * // Auto-dismiss a consent button whenever it appears, in any frame.
-   * const id = await page.addReaction(css("button#accept").inAllFrames());
+   * const id = await page.addReaction(css("button#accept"));
+   *
+   * @example
+   * // Only the one inside the consent provider's iframe.
+   * const cmp = frameUrl("*consent.example.com/*");
+   * const id = await page.addReaction(css("button.accept").in(cmp));
    *
    * @example
    * // Watch for a newsletter modal, but click its close "X" instead.
@@ -1825,7 +2145,7 @@ export class Page {
    *
    * @example
    * const pending = await page.listReactions();
-   * for (const r of pending) console.log(r.reactionId, r.matchSelector);
+   * for (const r of pending) console.log(r.reactionId, String(r.match));
    */
   async listReactions(): Promise<ReactionInfo[]> {
     return listReactions(this.reactionScope());
@@ -2126,4 +2446,15 @@ async function* resumeStream<T>(
     yield result.value;
     result = await iterator.next();
   }
+}
+
+/** The frame with this id in the tree below (and including) f, if any. */
+function findFrame(f: FrameInfo | undefined, frameId: string): FrameInfo | undefined {
+  if (!f) return undefined;
+  if (f.frameId === frameId) return f;
+  for (const c of f.children ?? []) {
+    const hit = findFrame(c, frameId);
+    if (hit) return hit;
+  }
+  return undefined;
 }

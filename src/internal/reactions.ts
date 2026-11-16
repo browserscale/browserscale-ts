@@ -7,7 +7,7 @@ import {
   ListReactionsRequestSchema,
 } from "../gen/wrc_pb.ts";
 import { BrowserScaleError, throwCommandError } from "../errors.ts";
-import type { Locator } from "../locator.ts";
+import { Locator } from "../locator.ts";
 import type { ReactionOpts } from "../options.ts";
 import type { ReactionInfo } from "../types.ts";
 
@@ -34,10 +34,15 @@ export async function addReaction(
   });
   if (match.selector) req.matchSelector = match.selector;
   if (match.jsExpression) req.matchJsExpression = match.jsExpression;
-  if (match.frameId) req.frameId = match.frameId;
+  req.in = match.chain();
   if (match.visibleFlag !== undefined) req.visible = match.visibleFlag;
   if (opts?.on) {
     assertReactionLocator("addReaction", opts.on, "on");
+    if (opts.on.container) {
+      throw new BrowserScaleError(
+        "browserscale.addReaction: on is looked for in the matched element's frame and takes no container of its own",
+      );
+    }
     if (opts.on.selector) req.actionSelector = opts.on.selector;
     if (opts.on.jsExpression) req.actionJsExpression = opts.on.jsExpression;
   }
@@ -76,22 +81,31 @@ export async function listReactions(s: ReactionScope): Promise<ReactionInfo[]> {
     matchJsExpression: r.matchJsExpression ?? "",
     actionSelector: r.actionSelector ?? "",
     actionJsExpression: r.actionJsExpression ?? "",
-    frameId: r.frameId,
+    match: Locator._reactionMatch({
+      selector: r.matchSelector ?? "",
+      jsExpression: r.matchJsExpression ?? "",
+      chain: r.in,
+      visible: r.visible,
+    }),
     visible: r.visible,
     allPages: r.allPages,
   }));
 }
 
-/** A reaction matches like a wait condition: css()/js() only. */
+/**
+ * A reaction matches like a wait condition: css()/js() only. A reference, a
+ * frame or at() is rejected: a reaction watches for an element to appear.
+ */
 function assertReactionLocator(cmd: string, l: Locator, role: string): void {
-  if (l.backendNodeId !== 0 || l.x !== undefined || l.y !== undefined) {
+  if (l.refValue || l.x !== undefined || l.y !== undefined) {
     throw new BrowserScaleError(
-      `browserscale.${cmd}: ${role} must be a css()/js() locator (node()/at() are not valid)`,
+      `browserscale.${cmd}: ${role} must be a css()/js() locator (a reference or at() is not valid here)`,
     );
   }
   if (!l.selector && !l.jsExpression) {
     throw new BrowserScaleError(
-      `browserscale.${cmd}: ${role} must have a CSS selector or JS expression`,
+      `browserscale.${cmd}: ${role} must have a CSS selector or JS expression; to watch a frame, put the locator in it with in()`,
     );
   }
+  l.validateChain(cmd);
 }

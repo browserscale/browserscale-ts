@@ -18,6 +18,8 @@ import {
   type SelectorMatch as ProtoSelectorMatch,
   type WaitConditionStatus as ProtoWaitConditionStatus,
   type FrameInfo as ProtoFrameInfo,
+  type FrameRef as ProtoFrameRef,
+  type Container as ProtoContainer,
   type PageInfo as ProtoPageInfo,
   type SessionUsage as ProtoSessionUsage,
   type Header as ProtoHeader,
@@ -43,9 +45,10 @@ import {
 import type {
   CaptchaInterruption,
   DragResult,
-  ElementRef,
   ElementResult,
+  FocusedElement,
   FrameInfo,
+  FrameRef,
   Header,
   InterceptedRequest,
   InterceptedResponse,
@@ -74,7 +77,7 @@ import type { StorageOriginEntry } from "../storage.ts";
 import type { AuthSession } from "../auth-session.ts";
 import type { ClientIdentity, ProxyConfig, UaBrand } from "../identity.ts";
 import type { HeaderModification, RequestPattern } from "../network.ts";
-import { type Locator, pickFrame } from "../locator.ts";
+import { Locator } from "../locator.ts";
 import type { Page } from "../page.ts";
 
 // ──────────────────────────────────────────────────────────────────────
@@ -82,32 +85,54 @@ import type { Page } from "../page.ts";
 // ──────────────────────────────────────────────────────────────────────
 
 /**
- * Common flat-target fields for Click / Fill / MoveTo / ScrollTo / Drag /
- * SelectOption requests. Empty / zero fields are returned as undefined so
- * proto3 presence-tracking treats them as unset on the wire.
+ * Common target fields for Click / Fill / MoveTo / ScrollTo / Drag /
+ * SelectOption / ReadCanvas requests: exactly one of ref, selector and
+ * jsExpression (or x and y), and the chain of containers the target is looked
+ * for in. Empty fields are left out so proto3 presence-tracking treats them
+ * as unset on the wire.
  */
 export interface ElementTargetFields {
+  ref?: string;
   selector?: string;
   jsExpression?: string;
-  backendNodeId?: number;
-  frameId?: string;
+  in: ProtoContainer[];
   x?: number;
   y?: number;
 }
 
-export function elementFields(
-  target: Locator,
-  optsInFrame?: string,
-): ElementTargetFields {
-  const out: ElementTargetFields = {};
+export function elementFields(target: Locator): ElementTargetFields {
+  const out: ElementTargetFields = { in: target.chain() };
+  if (target.refValue) out.ref = target.refValue;
   if (target.selector) out.selector = target.selector;
   if (target.jsExpression) out.jsExpression = target.jsExpression;
-  if (target.backendNodeId) out.backendNodeId = target.backendNodeId;
-  const fid = pickFrame(optsInFrame, target);
-  if (fid) out.frameId = fid;
   if (target.x !== undefined) out.x = target.x;
   if (target.y !== undefined) out.y = target.y;
   return out;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// References and the frame an element was found in
+// ──────────────────────────────────────────────────────────────────────
+
+export function frameRefFromProto(f: ProtoFrameRef | undefined): FrameRef {
+  if (!f) return { id: "", url: "", main: false };
+  return { id: f.frameId, url: f.url, main: f.main };
+}
+
+/**
+ * The Locator a result hands out for the element it found, or undefined when
+ * the result names none (a click at coordinates, an expression that answered
+ * with a value). frameId is the frame it was seen in.
+ */
+export function refLocator(ref: string | undefined, frameId: string = ""): Locator | undefined {
+  return ref ? Locator._ref(ref, frameId) : undefined;
+}
+
+/** Sets `ref` on a result only when the result names an element. */
+function withRef<T extends object>(res: T, ref: string | undefined, frameId: string): T {
+  const l = refLocator(ref, frameId);
+  if (l) (res as { ref?: Locator }).ref = l;
+  return res;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -133,8 +158,8 @@ export function rectFromProto(r: ProtoRect | undefined): Rect {
 
 interface ElementLike {
   success: boolean;
-  frameId: string;
-  backendNodeId: number;
+  ref: string;
+  frame?: ProtoFrameRef;
   selectorMatch?: ProtoSelectorMatch;
 }
 
@@ -145,15 +170,12 @@ function elementResult(
   rootX: number,
   rootY: number,
 ): ElementResult {
-  const res: ElementResult = {
-    success: r.success,
-    frameId: r.frameId,
-    backendNodeId: r.backendNodeId,
-    isVisible,
-    bounds,
-    rootX,
-    rootY,
-  };
+  const frame = frameRefFromProto(r.frame);
+  const res: ElementResult = withRef(
+    { success: r.success, frame, isVisible, bounds, rootX, rootY },
+    r.ref,
+    frame.id,
+  );
   const selectorMatch = selectorMatchFromProto(r.selectorMatch);
   if (selectorMatch) res.selectorMatch = selectorMatch;
   return res;
@@ -166,21 +188,24 @@ function selectorMatchFromProto(m?: ProtoSelectorMatch): SelectorMatch | undefin
 
 function occluderFromProto(o?: ProtoOccluderInfo): OccluderInfo | undefined {
   if (!o) return undefined;
-  return {
-    backendNodeId: o.backendNodeId,
-    frameId: o.frameId,
-    tagName: o.tagName,
-    id: o.id ?? "",
-    className: o.className ?? "",
-    text: o.text ?? "",
-    bounds: rectFromProto(o.bounds),
-    pointerEvents: o.pointerEvents ?? "",
-    visibility: o.visibility ?? "",
-    opacity: o.opacity ?? 0,
-    zIndex: o.zIndex ?? "",
-    hittableWhileInvisible: o.hittableWhileInvisible ?? false,
-    position: o.position ?? "",
-  };
+  return withRef(
+    {
+      frameId: o.frameId,
+      tagName: o.tagName,
+      id: o.id ?? "",
+      className: o.className ?? "",
+      text: o.text ?? "",
+      bounds: rectFromProto(o.bounds),
+      pointerEvents: o.pointerEvents ?? "",
+      visibility: o.visibility ?? "",
+      opacity: o.opacity ?? 0,
+      zIndex: o.zIndex ?? "",
+      hittableWhileInvisible: o.hittableWhileInvisible ?? false,
+      position: o.position ?? "",
+    },
+    o.ref,
+    o.frameId,
+  );
 }
 
 // Nested click-core detail (no standalone result) surfaced inside a FillError
@@ -198,18 +223,21 @@ function clickDetailFromProto(e?: ProtoClickError): ClickError | undefined {
 
 // Lightweight element descriptor, surfaced inside a FillError to name the
 // element that stole focus in a focus-loss failure.
-function elementRefFromProto(e?: ProtoElementRef): ElementRef | undefined {
+function focusedElementFromProto(e?: ProtoElementRef): FocusedElement | undefined {
   if (!e) return undefined;
-  return {
-    backendNodeId: e.backendNodeId,
-    tagName: e.tagName,
-    id: e.id,
-    name: e.name,
-    className: e.className,
-    inputType: e.inputType,
-    text: e.text,
-    editable: e.editable,
-  };
+  return withRef(
+    {
+      tagName: e.tagName,
+      id: e.id,
+      name: e.name,
+      className: e.className,
+      inputType: e.inputType,
+      text: e.text,
+      editable: e.editable,
+    },
+    e.ref,
+    "",
+  );
 }
 
 function captchasFromProto(
@@ -254,7 +282,7 @@ export function unwrapFill(r: ProtoFillResult): ElementResult {
       message: r.error.message,
       clickError: clickDetailFromProto(r.error.clickError),
       focusedBackendNodeId: r.error.focusedBackendNodeId,
-      focusedElement: elementRefFromProto(r.error.focusedElement),
+      focusedElement: focusedElementFromProto(r.error.focusedElement),
       targetEditable: r.error.targetEditable,
       targetValueLength: r.error.targetValueLength,
       result: res,
@@ -289,15 +317,19 @@ export function unwrapScroll(r: ProtoScrollResult): ElementResult {
 
 /** Maps a DragResult; throws {@link DragError} when the source pickup failed. */
 export function unwrapDrag(r: ProtoDragResult): DragResult {
-  const res: DragResult = {
-    success: r.success,
-    frameId: r.frameId,
-    backendNodeId: r.backendNodeId,
-    startX: r.startX,
-    startY: r.startY,
-    endX: r.endX,
-    endY: r.endY,
-  };
+  const frame = frameRefFromProto(r.frame);
+  const res: DragResult = withRef(
+    {
+      success: r.success,
+      frame,
+      startX: r.startX,
+      startY: r.startY,
+      endX: r.endX,
+      endY: r.endY,
+    },
+    r.ref,
+    frame.id,
+  );
   const captchas = captchasFromProto(r.captchas);
   if (captchas) res.captchas = captchas;
   const selectorMatch = selectorMatchFromProto(r.selectorMatch);
@@ -315,11 +347,17 @@ export function unwrapDrag(r: ProtoDragResult): DragResult {
 
 /** Maps a SelectOptionResult; throws {@link SelectOptionError} when no option was selected. */
 export function unwrapSelect(r: ProtoSelectOptionResult): SelectOptionResult {
-  const res: SelectOptionResult = {
-    selectedIndex: r.selectedIndex,
-    selectedValue: r.selectedValue,
-    selectedText: r.selectedText,
-  };
+  const frame = frameRefFromProto(r.frame);
+  const res: SelectOptionResult = withRef(
+    {
+      selectedIndex: r.selectedIndex,
+      selectedValue: r.selectedValue,
+      selectedText: r.selectedText,
+      frame,
+    },
+    r.ref,
+    frame.id,
+  );
   if (!r.success && r.error) {
     throw new SelectOptionError({ code: r.error.code, message: r.error.message, result: res });
   }
@@ -327,16 +365,21 @@ export function unwrapSelect(r: ProtoSelectOptionResult): SelectOptionResult {
 }
 
 function waitConditionStatusFromProto(c: ProtoWaitConditionStatus): WaitConditionStatus {
-  return {
-    index: c.index,
-    state: c.state,
-    backendNodeId: c.backendNodeId,
-    frameId: c.frameId,
-    isVisible: c.isVisible,
-    bounds: c.bounds ? rectFromProto(c.bounds) : undefined,
-    occluder: occluderFromProto(c.occluder),
-    selectorMatch: selectorMatchFromProto(c.selectorMatch),
-  };
+  const res: WaitConditionStatus = withRef(
+    {
+      index: c.index,
+      state: c.state,
+      frameId: c.frameId,
+      isVisible: c.isVisible,
+      bounds: c.bounds ? rectFromProto(c.bounds) : undefined,
+      occluder: occluderFromProto(c.occluder),
+      selectorMatch: selectorMatchFromProto(c.selectorMatch),
+    },
+    c.ref,
+    c.frameId,
+  );
+  if (c.scopeError) res.scopeError = c.scopeError;
+  return res;
 }
 
 /** Maps a WaitResult; throws {@link WaitError} when no condition matched before the deadline. */
@@ -350,25 +393,30 @@ export function unwrapWait(r: ProtoWaitResult): WaitResult {
   }
   const base = { success: true as const, index: r.index };
   switch (r.kind) {
-    case "element":
+    case "element": {
+      const frame = frameRefFromProto(r.element?.frame);
       return {
         ...base,
         kind: "element",
-        element: {
-          frameId: r.element?.frameId ?? "",
-          backendNodeId: r.element?.backendNodeId ?? 0,
-          isVisible: r.element?.isVisible ?? false,
-          bounds: rectFromProto(r.element?.bounds),
-          ...(r.element?.selectorMatch && {
-            selectorMatch: selectorMatchFromProto(r.element.selectorMatch),
-          }),
-        },
+        element: withRef(
+          {
+            frame,
+            isVisible: r.element?.isVisible ?? false,
+            bounds: rectFromProto(r.element?.bounds),
+            ...(r.element?.selectorMatch && {
+              selectorMatch: selectorMatchFromProto(r.element.selectorMatch),
+            }),
+          },
+          r.element?.ref,
+          frame.id,
+        ),
       };
+    }
     case "captcha":
       return {
         ...base,
         kind: "captcha",
-        captcha: { kind: r.captcha?.kind ?? "", frameId: r.captcha?.frameId ?? "" },
+        captcha: { kind: r.captcha?.kind ?? "", frame: frameRefFromProto(r.captcha?.frame) },
       };
     case "request": {
       const request = interceptedRequestFromProto(r.request);
@@ -392,6 +440,7 @@ export function frameInfoFromProto(f: ProtoFrameInfo): FrameInfo {
   return {
     frameId: f.frameId,
     url: f.url,
+    name: f.name,
     isOOPIF: f.isOopif,
     hasJSContext: f.hasJsContext,
     isLoading: f.isLoading,

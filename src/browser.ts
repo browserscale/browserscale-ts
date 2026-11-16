@@ -8,8 +8,20 @@ export { Page } from "./page.ts";
 export { WebSocketTransport } from "./ws-transport.ts";
 export { BrowserConfig } from "./config.ts";
 
-// Locator + constructors + AllFrames sentinel
-export { Locator, css, js, node, at, AllFrames } from "./locator.ts";
+// Locator + constructors
+export {
+  Locator,
+  css,
+  js,
+  ref,
+  at,
+  frameUrl,
+  frameName,
+  frameById,
+  mainFrame,
+  anyFrame,
+  frame,
+} from "./locator.ts";
 
 // Wait-only conditions (accepted by wait()/waitAny(), not by actions)
 export {
@@ -42,10 +54,12 @@ export {
   WaitError,
   PageClosedError,
   PageNotFocusedError,
+  StaleRefError,
   NoPageError,
 } from "./errors.ts";
 
 // Plain user-facing types
+export { walkFrames } from "./types.ts";
 export type {
   Rect,
   FrameInfo,
@@ -71,7 +85,8 @@ export type {
   WaitConditionStatus,
   SelectorMatch,
   OccluderInfo,
-  ElementRef,
+  FocusedElement,
+  FrameRef,
   NavigateResult,
   EvaluateResult,
   ElementResult,

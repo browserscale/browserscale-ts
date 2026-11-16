@@ -1,9 +1,10 @@
 import { Code, ConnectError } from "@connectrpc/connect";
+import type { Locator } from "./locator.ts";
 import type { Page } from "./page.ts";
 import type {
   DragResult,
-  ElementRef,
   ElementResult,
+  FocusedElement,
   OccluderInfo,
   SelectOptionResult,
   WaitConditionStatus,
@@ -108,7 +109,12 @@ export class ClickError extends BrowserScaleError {
    * matches that are not rendered, so with several matches none of them is)
    * or `"captcha_failed"` (a
    * captcha appeared during the click and auto-solve could not solve it, with
-   * `onFailure: "fail"`).
+   * `onFailure: "fail"`). Where the target was looked for has its own codes:
+   * `"container_not_found"` (a container given with {@link Locator.in} is not
+   * on the page; the message names the missing link), `"outside_scope"` (a
+   * js() target returned an element outside its container) and `"stale_ref"`
+   * (a reference whose element is gone; the call throws a
+   * {@link StaleRefError} around this error).
    */
   readonly code: string;
   /** The intercepting element (present for occlusion codes). */
@@ -173,7 +179,7 @@ export class FillError extends BrowserScaleError {
    * The element that grabbed focus instead of the target (`"focus_stolen"`), so
    * you can act on it (e.g. a consent button).
    */
-  readonly focusedElement?: ElementRef;
+  readonly focusedElement?: FocusedElement;
   /**
    * The fill target's own state at the point of failure (the focus codes):
    * whether it is still an editable text sink and its current text length.
@@ -188,7 +194,7 @@ export class FillError extends BrowserScaleError {
     message: string;
     clickError?: ClickError;
     focusedBackendNodeId?: number;
-    focusedElement?: ElementRef;
+    focusedElement?: FocusedElement;
     targetEditable?: boolean;
     targetValueLength?: number;
     result: ElementResult;
@@ -238,7 +244,10 @@ export class DragError extends BrowserScaleError {
  * not be located/scrolled.
  */
 export class ScrollError extends BrowserScaleError {
-  /** Currently always `"not_found"`. */
+  /**
+   * `"not_found"`, or one of the codes about where the target was looked for:
+   * `"container_not_found"`, `"outside_scope"`, `"stale_ref"`.
+   */
   readonly code: string;
   readonly result: ElementResult;
 
@@ -256,7 +265,11 @@ export class ScrollError extends BrowserScaleError {
  * failure.
  */
 export class MoveError extends BrowserScaleError {
-  /** `"not_found"` or `"page_not_focused"`. */
+  /**
+   * `"not_found"` or `"page_not_focused"`, or one of the codes about where the
+   * target was looked for: `"container_not_found"`, `"outside_scope"`,
+   * `"stale_ref"`.
+   */
   readonly code: string;
   /**
    * For code `"page_not_focused"`, the page that has the focus. The call
@@ -288,7 +301,9 @@ export class MoveError extends BrowserScaleError {
 export class SelectOptionError extends BrowserScaleError {
   /**
    * `"not_found"` (the `<select>` was not located) or `"option_not_found"` (no
-   * option matched the requested index/value/text).
+   * option matched the requested index/value/text), or one of the codes about
+   * where the `<select>` was looked for: `"container_not_found"`,
+   * `"outside_scope"`, `"stale_ref"`.
    */
   readonly code: string;
   readonly result: SelectOptionResult;
@@ -337,7 +352,8 @@ export class SolveCaptchaError extends BrowserScaleError {
  * WaitError is thrown by {@link Page.wait} / {@link Page.waitAny}
  * when no condition matched before the deadline. `conditions` holds the
  * per-condition breakdown (same order/length as the conditions passed in)
- * explaining why each one never matched.
+ * explaining why each one never matched; a condition whose container was
+ * never on the page says so in its `scopeError`.
  */
 export class WaitError extends BrowserScaleError {
   /** Machine-stable failure code, currently always `"timeout"`. */
@@ -412,6 +428,68 @@ export class PageNotFocusedError extends BrowserScaleError {
     this.name = "PageNotFocusedError";
     this.focusedPage = init.focusedPage;
   }
+}
+
+/**
+ * StaleRefError is thrown when a call was given a reference whose element is
+ * gone: the document it was seen in was replaced by a navigation or a reload,
+ * or the element was removed from it. A reference is never re-interpreted, so
+ * the call fails instead of acting on whatever took the element's place. Look
+ * again ({@link Page.wait}, {@link Page.getObservation}) and go on with the
+ * new reference.
+ *
+ * `cause` is the call's own error ({@link ClickError}, {@link FillError},
+ * {@link CommandError}, …), whose `code` is `"stale_ref"`.
+ *
+ *   let found = await page.wait(css(".result"));
+ *   try {
+ *     await page.click(found.element.ref!);
+ *   } catch (e) {
+ *     if (!(e instanceof StaleRefError)) throw e;
+ *     console.log("the page moved on to", e.url);
+ *     found = await page.wait(css(".result"));
+ *   }
+ */
+export class StaleRefError extends BrowserScaleError {
+  /**
+   * The reference that went stale: the call's target, or the container it was
+   * to be looked for in.
+   */
+  readonly ref?: Locator;
+  /**
+   * Where the frame the element was seen in is now, or the page's URL when
+   * that frame is gone too. When it differs from the URL the element was found
+   * at, the frame navigated; when it is the same, the document was reloaded or
+   * the element removed. Empty if it could not be read.
+   */
+  readonly url: string;
+  declare readonly cause: BrowserScaleError;
+
+  constructor(init: { ref?: Locator; url: string; cause: BrowserScaleError }) {
+    super(init.cause.message, init.cause);
+    this.name = "StaleRefError";
+    this.ref = init.ref;
+    this.url = init.url;
+  }
+}
+
+const codeStaleRef = "stale_ref";
+
+/**
+ * @internal Whether err is one of the SDK's typed errors saying a reference
+ * went stale.
+ */
+export function isStaleRef(err: unknown): err is BrowserScaleError {
+  return (
+    (err instanceof ClickError ||
+      err instanceof FillError ||
+      err instanceof DragError ||
+      err instanceof SelectOptionError ||
+      err instanceof ScrollError ||
+      err instanceof MoveError ||
+      err instanceof CommandError) &&
+    err.code === codeStaleRef
+  );
 }
 
 const codePageNotFocused = "page_not_focused";
