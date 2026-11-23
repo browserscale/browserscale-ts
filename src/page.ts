@@ -86,6 +86,7 @@ import type {
 import type {
   ClickOpts,
   FillOpts,
+  EvaluateOpts,
   GetDOMOpts,
   GetObservationOpts,
   LoadHTMLOpts,
@@ -366,24 +367,53 @@ export class Page {
    * The generic T is a TypeScript hint only — there is no runtime
    * validation that the JS expression actually returned that type.
    *
+   * A promise is waited for: the call resolves when it settles, with the value
+   * it resolved to, and a rejected one rejects with a {@link CommandError} of
+   * code `"threw"`. The wait ends after 30 s with `"timeout"`; `opts` sets
+   * another time, or starts the promise without waiting. The expression may
+   * use `await` directly. It then runs as the body of an async function: a
+   * single expression is the value, several statements end with `return`.
+   *
+   * The page sees nothing of the expression: what it throws is not reported to
+   * the page's error handling, and a promise is watched without subscribing to
+   * it.
+   *
    * A falsy answer and a broken expression are different outcomes. Returning
    * null, false or undefined is a successful evaluation and resolves normally;
    * an expression that throws or will not compile rejects with a
    * {@link CommandError}, so a typo can never read as "the page says null".
    *
    * @param expression - JavaScript expression evaluated in the main frame
+   * @param opts - where the expression runs, how long a promise is waited
+   *   for, or that it is not waited for; see {@link EvaluateOpts}
    *
    * @returns EvaluateResult with either value (non-Element) or element
    *   metadata (Element)
    *
-   * @throws {@link CommandError} - code `"threw"` (the expression raised; the
-   *   message carries the exception text), `"not_run"` (it could not be
-   *   compiled, or execution never started), `"aborted"` (the browser stopped
-   *   execution) or `"no_context"` (the frame had no live script context)
+   * @throws {@link CommandError} - code `"threw"` (the expression raised, or
+   *   the promise it answered with was rejected; the message carries the
+   *   exception text), `"timeout"` (the promise did not settle in time; it
+   *   goes on in the page), `"document_gone"` (the page navigated or
+   *   reloaded, or the frame was removed, before the expression answered),
+   *   `"not_run"` (it could not be compiled, or execution never started),
+   *   `"aborted"` (the browser stopped execution) or `"no_context"` (the
+   *   frame had no live script context). With `opts.in` also the codes of
+   *   {@link evaluateIn}
    *
    * @example
    * const res = await browser.evaluate<string>("document.title");
    * console.log(res.value);
+   *
+   * @example
+   * // A promise is waited for; await works as well.
+   * const items = await page.evaluate("fetch('/api/items').then(r => r.json())");
+   * const count = await page.evaluate<number>("(await (await fetch('/api/items')).json()).length");
+   *
+   * @example
+   * // Start work and come back to it: the first call resolves at once.
+   * await page.evaluate("window.job = crawl(urls)", { noAwait: true });
+   * // ... other steps ...
+   * const rows = await page.evaluate("window.job", { timeoutMs: 300_000 });
    *
    * @example
    * // Telling a false answer from a broken expression.
@@ -395,8 +425,15 @@ export class Page {
    *   throw e;
    * }
    */
-  async evaluate<T = unknown>(expression: string): Promise<EvaluateResult<T>> {
-    return this._evaluate<T>(undefined, expression);
+  async evaluate<T = unknown>(
+    expression: string,
+    opts?: EvaluateOpts,
+  ): Promise<EvaluateResult<T>> {
+    if (opts?.timeoutMs !== undefined && !(opts.timeoutMs >= 0)) {
+      throw new BrowserScaleError("browserscale.evaluate: timeoutMs must not be negative");
+    }
+    if (opts?.in) checkEvaluateContainer("evaluate", opts.in);
+    return this._evaluate<T>(opts?.in, expression, opts);
   }
 
   /**
@@ -438,19 +475,14 @@ export class Page {
     container: Locator,
     expression: string,
   ): Promise<EvaluateResult<T>> {
-    container.validateContainer("evaluateIn");
-    container.validateChain("evaluateIn");
-    if (container.isAnyFrame) {
-      throw new BrowserScaleError(
-        "browserscale.evaluateIn: anyFrame() names every frame, and an expression runs in one; name the frame",
-      );
-    }
+    checkEvaluateContainer("evaluateIn", container);
     return this._evaluate<T>(container, expression);
   }
 
   private async _evaluate<T>(
     container: Locator | undefined,
     expression: string,
+    opts?: EvaluateOpts,
   ): Promise<EvaluateResult<T>> {
     const req = create(EvaluateRequestSchema, {
       sessionId: this.sessionId,
@@ -458,7 +490,9 @@ export class Page {
       apiKey: this.apiKey,
       expression,
       in: container ? container.chainWithSelf() : [],
+      noAwait: opts?.noAwait === true,
     });
+    if (opts?.timeoutMs) req.timeout = opts.timeoutMs;
     const resp = await this.client.evaluate(req);
     // An expression that threw arrives as success=false in the payload, not as a
     // transport error, so it is raised here rather than by the call above.
@@ -766,8 +800,8 @@ export class Page {
    * content.
    *
    * The browser scrolls the element into view, moves the cursor along
-   * a human-like path, clicks to focus, then types the text character-
-   * by-character with QWERTZ keyboard simulation and human-like timing.
+   * a human-like path, clicks to focus, then types the text key by key on
+   * the keyboard layout of the session's region, with human-like timing.
    *
    * To overwrite the field instead of appending, pass `{ clearFirst: true }`.
    *
@@ -1838,9 +1872,9 @@ export class Page {
 
   /**
    * Types `text` into the currently focused element as a per-key stream of real
-   * keyboard events (keyDown/char/keyUp with the context's QWERTZ/QWERTY layout
-   * and human cadence) — unlike {@link insertText}, a single IME-style commit
-   * with no key events.
+   * keyboard events (keyDown/char/keyUp on the keyboard layout of the session's
+   * region, with human cadence) — unlike {@link insertText}, a single IME-style
+   * commit with no key events.
    *
    * `type` is intentionally UNtargeted and loose: it does not locate or focus
    * any element and does NOT pin focus, so the page is free to route keys and
@@ -2445,6 +2479,17 @@ async function* resumeStream<T>(
   while (!result.done) {
     yield result.value;
     result = await iterator.next();
+  }
+}
+
+/** Throws when an expression cannot run in the container. */
+function checkEvaluateContainer(method: string, container: Locator): void {
+  container.validateContainer(method);
+  container.validateChain(method);
+  if (container.isAnyFrame) {
+    throw new BrowserScaleError(
+      `browserscale.${method}: anyFrame() names every frame, and an expression runs in one; name the frame`,
+    );
   }
 }
 

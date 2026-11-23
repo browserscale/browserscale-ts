@@ -117,6 +117,7 @@ export type {
   FillOpts,
   ReactionOpts,
   SelectOpts,
+  EvaluateOpts,
   WaitOpts,
   WaitUntil,
   NavigateOpts,

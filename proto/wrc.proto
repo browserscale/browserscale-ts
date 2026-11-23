@@ -1242,10 +1242,19 @@ message EvaluateRequest {
   // to, with __wrc.scope set when it ends at an element. Empty: the main
   // document. A chain has to lead to one document, so `any` is not for here.
   repeated Container in = 5;
+  // A promise the expression answers with is waited for, and what it settles
+  // with is the result: its value, or "threw" with the reason it was rejected
+  // with. This is how long, in milliseconds (default 30000); after that the
+  // call fails with "timeout" and the promise goes on in the page.
+  optional double timeout = 6;
+  // Start the promise and do not wait for it: the call answers at once, with
+  // no value.
+  bool no_await = 7;
 }
 
 message EvaluateResponse {
   // JSON-serialized result. Empty for DOM elements or unserializable values.
+  // What a promise resolved to, where the expression answered with one.
   string result = 1;
   // Set if the expression returned a DOM element: a reference to it.
   string ref = 2;
@@ -1257,6 +1266,11 @@ message EvaluateResponse {
   // An expression that answers falsy is a success, so a broken expression is
   // never mistaken for a false one.
   bool success = 5;
+  // Codes: "threw" (the expression raised, or its promise was rejected),
+  // "not_run", "aborted", "no_context", "container_not_found", "stale_ref",
+  // "outside_scope", "timeout" (the promise did not settle in time),
+  // "document_gone" (the page navigated or reloaded, or the frame was removed,
+  // before the answer).
   optional CommandError error = 6;
 }
 

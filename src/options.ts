@@ -94,6 +94,31 @@ export interface SelectOpts {
   fireEvents?: boolean;
 }
 
+/** Optional customization for {@link Page.evaluate}. */
+export interface EvaluateOpts {
+  /**
+   * Where the expression runs, as the container of {@link Page.evaluateIn}:
+   * a frame, or an element the expression then sees as `__wrc.scope`.
+   * Omitted: the main document.
+   */
+  in?: Locator;
+
+  /**
+   * How long a promise the expression answers with is waited for, in ms.
+   * Omit for the default (30 000). After that the call rejects with
+   * `"timeout"` and the promise goes on in the page.
+   */
+  timeoutMs?: number;
+
+  /**
+   * `true` starts a promise without waiting for it: the call resolves at
+   * once, with no value. For work that goes on while the script does
+   * something else; keep the promise in a variable of the page to come back
+   * to it.
+   */
+  noAwait?: boolean;
+}
+
 /** Optional customization for {@link Page.wait} / {@link Page.waitAny}. */
 export interface WaitOpts {
   /** Omitted leaves it to the API, which defaults to 30 000 ms. */
